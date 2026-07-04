@@ -46,7 +46,7 @@ run_fetch_shard <- function(io, out_dir, roster_path, shard) {
     if (is.null(rows) || nrow(rows) == 0L) { mine$done[i] <- 1L; next }
     counts_acc[[length(counts_acc) + 1L]] <- rows
     mine$done[i] <- 1L
-    mine$last_day[i] <- max(rows$day)
+    mine$last_day[i] <- max(rows$day, na.rm = TRUE)
   }
   counts_all <- if (length(counts_acc)) do.call(rbind, counts_acc) else
     data.frame(binary_name = character(0), version = character(0),
@@ -83,7 +83,7 @@ run_merge <- function(io, out_dir, parts_dir) {
   DBI::dbExecute(con, daily_table_ddl(DAILY_TABLE))
   if (nrow(daily_all) > 0) DBI::dbWriteTable(con, DAILY_TABLE, daily_all[c("package","date","count")], append = TRUE)
 
-  anchor <- if (nrow(daily_all) > 0) max(daily_all$date) else format(Sys.Date())
+  anchor <- if (nrow(daily_all) > 0) max(daily_all$date) else format(as.Date(io$now()))
   now <- io$now()
   summary_df <- build_summary(con, roster, anchor, prior_summary = NULL)
 
