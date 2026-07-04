@@ -307,3 +307,59 @@ build_summary <- function(daily_con, identity_df, anchor_date, prior_summary = N
   rownames(cur) <- NULL
   cur[SUMMARY_COLS]
 }
+
+iso <- function(t) format(as.POSIXct(t), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+
+coverage <- function(rows) {
+  if (nrow(rows) == 0L) return(list(rows = 0L, date_min = NA_character_, date_max = NA_character_))
+  list(rows = nrow(rows), date_min = min(rows$date), date_max = max(rows$date))
+}
+
+merge_shard_coverage <- function(prev, updates) {
+  out <- prev %||% list()
+  for (k in names(updates)) out[[k]] <- updates[[k]]
+  out
+}
+
+write_manifest <- function(path, obj) {
+  writeLines(jsonlite::toJSON(obj, auto_unbox = TRUE, pretty = TRUE, null = "null"), path)
+}
+
+write_release_notes <- function(path, manifest) {
+  ts   <- function(s) if (is.null(s) || is.na(s)) "n/a" else sub("Z$", " UTC", sub("T", " ", s))
+  cs   <- manifest$changed_shards
+  chng <- if (length(cs) == 0) "none (no change since last run)" else paste(unlist(cs), collapse = ", ")
+  sm   <- manifest$summary %||% list()
+
+  lines <- c(
+    "## c2d4u Downloads (rolling)",
+    "",
+    "Per-package daily download counts for CRAN and Bioconductor R packages",
+    "distributed as Ubuntu .debs through the Launchpad c2d4u PPAs.",
+    "This is a frozen legacy channel (see the repository README).",
+    "",
+    "| field | value |",
+    "| --- | --- |",
+    sprintf("| last checked | %s |", ts(manifest$last_checked)),
+    sprintf("| last changed | %s |", ts(manifest$last_changed)),
+    sprintf("| source | %s |", manifest$source_kind %||% "n/a"),
+    sprintf("| packages | %s |", sm$packages %||% "n/a"),
+    sprintf("| latest data day | %s |", sm$latest_date %||% "n/a"),
+    sprintf("| changed this run | %s |", chng),
+    "",
+    "## Shard coverage",
+    "",
+    "| shard | rows | from | to |",
+    "| --- | --- | --- | --- |")
+  for (nm in sort(names(manifest$shards))) {
+    s <- manifest$shards[[nm]]
+    lines <- c(lines, sprintf("| %s | %s | %s | %s |",
+                              nm, s$rows %||% "n/a", s$date_min %||% "n/a", s$date_max %||% "n/a"))
+  }
+  lines <- c(lines, "", "## Download", "",
+             "```sh",
+             "gh release download current --repo r-observatory/c2d4u-downloads \\",
+             "  --pattern 'c2d4u-downloads-recent.db'",
+             "```")
+  writeLines(lines, path)
+}
