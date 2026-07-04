@@ -127,18 +127,20 @@ resolve_identities <- function(binary_names, cran_map, bioc_map = NULL) {
 }
 
 aggregate_counts <- function(counts_df, identity_df) {
-  if (nrow(counts_df) == 0L) {
-    return(data.frame(package = character(0), date = character(0),
-                      count = integer(0), stringsAsFactors = FALSE))
-  }
+  empty <- data.frame(package = character(0), date = character(0),
+                      count = integer(0), stringsAsFactors = FALSE)
+  if (nrow(counts_df) == 0L) return(empty)
   pkg <- identity_df$package[match(counts_df$binary_name, identity_df$binary_name)]
   keep <- !is.na(pkg)
-  if (!any(keep)) {
-    return(data.frame(package = character(0), date = character(0),
-                      count = integer(0), stringsAsFactors = FALSE))
-  }
+  if (!any(keep)) return(empty)
   df <- data.frame(package = pkg[keep], date = counts_df$day[keep],
                    count = as.integer(counts_df$count[keep]), stringsAsFactors = FALSE)
+  bad <- is.na(df$date) | is.na(df$count)
+  if (any(bad)) {
+    warning(sprintf("aggregate_counts: dropping %d row(s) with NA day/count", sum(bad)))
+    df <- df[!bad, , drop = FALSE]
+  }
+  if (nrow(df) == 0L) return(empty)
   agg <- stats::aggregate(count ~ package + date, data = df, FUN = sum)
   agg <- agg[order(agg$package, agg$date), , drop = FALSE]
   agg$count <- as.integer(agg$count)
