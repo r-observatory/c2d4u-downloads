@@ -1,0 +1,123 @@
+name: Backfill c2d4u Downloads
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: c2d4u-downloads-backfill
+  cancel-in-progress: false
+jobs:
+  enumerate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with: { r-version: "release", use-public-rspm: true }
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::DBI
+            any::RSQLite
+            any::jsonlite
+            any::curl
+            any::testthat
+            any::withr
+      - name: Run unit tests
+        run: Rscript tests/testthat.R
+      - name: Enumerate roster
+        run: |
+          mkdir -p out
+          Rscript scripts/backfill.R enumerate
+        env:
+          C2D4U_OUT: out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: roster
+          path: out/c2d4u-roster.db
+
+  fetch:
+    needs: enumerate
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,w,x,y,z,"0"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with: { r-version: "release", use-public-rspm: true }
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::DBI
+            any::RSQLite
+            any::jsonlite
+            any::curl
+            any::testthat
+            any::withr
+      - uses: actions/download-artifact@v4
+        with: { name: roster, path: roster }
+      - name: Fetch shard ${{ matrix.shard }}
+        run: |
+          mkdir -p out
+          Rscript scripts/backfill.R fetch
+        env:
+          C2D4U_OUT: out
+          C2D4U_ROSTER: roster
+          C2D4U_SHARD: ${{ matrix.shard }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: out/c2d4u-downloads-shard-*.db
+          if-no-files-found: ignore
+
+  merge:
+    needs: fetch
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with: { r-version: "release", use-public-rspm: true }
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::DBI
+            any::RSQLite
+            any::jsonlite
+            any::curl
+            any::testthat
+            any::withr
+      - uses: actions/download-artifact@v4
+        with: { path: parts, pattern: shard-*, merge-multiple: true }
+      - name: Merge shards
+        run: |
+          mkdir -p out
+          Rscript scripts/backfill.R merge
+        env:
+          C2D4U_OUT: out
+          C2D4U_PARTS: parts
+      - name: Publish to "current" release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh release view current >/dev/null 2>&1; then
+            git tag -f current
+            git push -f origin current || true
+            gh release create current \
+              --title "c2d4u Downloads (rolling)" \
+              --notes-file out/release_notes.md \
+              --latest
+          fi
+          CHANGED=$(jq -r '.changed_shards[]' out/manifest.json)
+          for asset in $CHANGED; do
+            if [ -f "out/$asset" ]; then
+              gh release upload current "out/$asset" --clobber
+            fi
+          done
+          gh release upload current out/manifest.json --clobber
+          gh release edit current --notes-file out/release_notes.md

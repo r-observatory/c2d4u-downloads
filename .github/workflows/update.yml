@@ -1,0 +1,78 @@
+name: Update c2d4u Downloads
+on:
+  schedule:
+    # Monthly on the 3rd at 05:45 UTC. The source is frozen and Launchpad's
+    # reported day lags ~60 days, so a daily cron would be wasted work.
+    - cron: "45 5 3 * *"
+  workflow_dispatch:
+    inputs:
+      force_full_rebuild:
+        description: "Re-enumerate and re-fetch every release, rebuild all shards."
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency:
+  group: c2d4u-downloads-update
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "release"
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::DBI
+            any::RSQLite
+            any::jsonlite
+            any::curl
+            any::testthat
+            any::withr
+      - name: Run unit tests
+        run: Rscript tests/testthat.R
+      - name: Run update script
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          C2D4U_FORCE_REBUILD: ${{ inputs.force_full_rebuild }}
+        run: |
+          mkdir -p out
+          Rscript scripts/update.R out/
+      - name: Publish changed shards to "current" release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh release view current >/dev/null 2>&1; then
+            git tag -f current
+            git push -f origin current || true
+            gh release create current \
+              --title "c2d4u Downloads (rolling)" \
+              --notes-file out/release_notes.md \
+              --latest
+          fi
+          CHANGED=$(jq -r '.changed_shards[]' out/manifest.json)
+          for asset in $CHANGED; do
+            if [ -f "out/$asset" ]; then
+              gh release upload current "out/$asset" --clobber
+            else
+              echo "WARNING: $asset in manifest but not on disk"
+            fi
+          done
+          gh release upload current out/manifest.json --clobber
+          gh release edit current --notes-file out/release_notes.md
+      - name: Update last run timestamp
+        continue-on-error: true
+        run: |
+          echo "Last updated: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" > last-updated.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last-updated.txt
+          git diff --cached --quiet || git commit -m "chore: update last run time"
+          git pull --rebase || true
+          git push
