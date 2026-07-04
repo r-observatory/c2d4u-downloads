@@ -125,3 +125,34 @@ resolve_identities <- function(binary_names, cran_map, bioc_map = NULL) {
   rownames(df) <- NULL
   df
 }
+
+aggregate_counts <- function(counts_df, identity_df) {
+  if (nrow(counts_df) == 0L) {
+    return(data.frame(package = character(0), date = character(0),
+                      count = integer(0), stringsAsFactors = FALSE))
+  }
+  pkg <- identity_df$package[match(counts_df$binary_name, identity_df$binary_name)]
+  keep <- !is.na(pkg)
+  if (!any(keep)) {
+    return(data.frame(package = character(0), date = character(0),
+                      count = integer(0), stringsAsFactors = FALSE))
+  }
+  df <- data.frame(package = pkg[keep], date = counts_df$day[keep],
+                   count = as.integer(counts_df$count[keep]), stringsAsFactors = FALSE)
+  agg <- stats::aggregate(count ~ package + date, data = df, FUN = sum)
+  agg <- agg[order(agg$package, agg$date), , drop = FALSE]
+  agg$count <- as.integer(agg$count)
+  rownames(agg) <- NULL
+  agg
+}
+
+merge_daily <- function(old_df, new_df) {
+  out <- rbind(old_df, new_df)
+  out <- out[order(out$package, out$date), , drop = FALSE]
+  key <- paste(out$package, out$date)
+  # On a (package,date) conflict new_df wins because it is appended last;
+  # keep the LAST occurrence of each key. Rows only in old_df are preserved.
+  out <- out[!duplicated(key, fromLast = TRUE), , drop = FALSE]
+  rownames(out) <- NULL
+  out
+}
