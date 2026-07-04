@@ -19,3 +19,17 @@ test_that("write_manifest round-trips through JSON", {
   got <- jsonlite::fromJSON(p, simplifyVector = FALSE)
   expect_identical(got$source_kind, "launchpad")
 })
+
+test_that("coverage ignores NA dates rather than poisoning the range", {
+  r <- data.frame(package = "a", date = c("2026-01-01", NA, "2026-03-01"),
+                  count = c(1L, 2L, 3L), stringsAsFactors = FALSE)
+  cov <- coverage(r)
+  expect_identical(cov$rows, 3L)
+  expect_identical(cov$date_min, "2026-01-01")
+  expect_identical(cov$date_max, "2026-03-01")
+})
+
+test_that("iso formats a POSIXct as a UTC Z timestamp", {
+  expect_identical(iso(as.POSIXct("2026-07-04 12:34:56", tz = "UTC")),
+                   "2026-07-04T12:34:56Z")
+})

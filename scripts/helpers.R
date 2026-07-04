@@ -311,8 +311,10 @@ build_summary <- function(daily_con, identity_df, anchor_date, prior_summary = N
 iso <- function(t) format(as.POSIXct(t), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
 
 coverage <- function(rows) {
-  if (nrow(rows) == 0L) return(list(rows = 0L, date_min = NA_character_, date_max = NA_character_))
-  list(rows = nrow(rows), date_min = min(rows$date), date_max = max(rows$date))
+  valid <- rows$date[!is.na(rows$date)]
+  if (length(valid) == 0L)
+    return(list(rows = nrow(rows), date_min = NA_character_, date_max = NA_character_))
+  list(rows = nrow(rows), date_min = min(valid), date_max = max(valid))
 }
 
 merge_shard_coverage <- function(prev, updates) {
@@ -326,7 +328,8 @@ write_manifest <- function(path, obj) {
 }
 
 write_release_notes <- function(path, manifest) {
-  ts   <- function(s) if (is.null(s) || is.na(s)) "n/a" else sub("Z$", " UTC", sub("T", " ", s))
+  or_na <- function(x) if (is.null(x) || length(x) == 0 || (length(x) == 1 && is.na(x))) "n/a" else as.character(x)
+  ts    <- function(s) if (is.null(s) || length(s) == 0 || is.na(s)) "n/a" else sub("Z$", " UTC", sub("T", " ", s))
   cs   <- manifest$changed_shards
   chng <- if (length(cs) == 0) "none (no change since last run)" else paste(unlist(cs), collapse = ", ")
   sm   <- manifest$summary %||% list()
@@ -342,9 +345,9 @@ write_release_notes <- function(path, manifest) {
     "| --- | --- |",
     sprintf("| last checked | %s |", ts(manifest$last_checked)),
     sprintf("| last changed | %s |", ts(manifest$last_changed)),
-    sprintf("| source | %s |", manifest$source_kind %||% "n/a"),
-    sprintf("| packages | %s |", sm$packages %||% "n/a"),
-    sprintf("| latest data day | %s |", sm$latest_date %||% "n/a"),
+    sprintf("| source | %s |", or_na(manifest$source_kind)),
+    sprintf("| packages | %s |", or_na(sm$packages)),
+    sprintf("| latest data day | %s |", or_na(sm$latest_date)),
     sprintf("| changed this run | %s |", chng),
     "",
     "## Shard coverage",
@@ -354,7 +357,7 @@ write_release_notes <- function(path, manifest) {
   for (nm in sort(names(manifest$shards))) {
     s <- manifest$shards[[nm]]
     lines <- c(lines, sprintf("| %s | %s | %s | %s |",
-                              nm, s$rows %||% "n/a", s$date_min %||% "n/a", s$date_max %||% "n/a"))
+                              nm, or_na(s$rows), or_na(s$date_min), or_na(s$date_max)))
   }
   lines <- c(lines, "", "## Download", "",
              "```sh",
