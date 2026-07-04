@@ -158,3 +158,84 @@ merge_daily <- function(old_df, new_df) {
   rownames(out) <- NULL
   out
 }
+
+daily_table_ddl <- function(table) sprintf(
+  "CREATE TABLE %s (
+     package TEXT    NOT NULL,
+     date    TEXT    NOT NULL,
+     count   INTEGER NOT NULL,
+     PRIMARY KEY (package, date))", table)
+
+summary_table_ddl <- function(table) sprintf(
+  "CREATE TABLE %s (
+     package       TEXT,
+     package_lower TEXT,
+     origin        TEXT,
+     canonical_name TEXT,
+     total_30d     INTEGER,
+     total_90d     INTEGER,
+     total_365d    INTEGER,
+     rank_30d      INTEGER,
+     rank_90d      INTEGER,
+     rank_365d     INTEGER,
+     avg_daily_30d REAL,
+     trend         REAL,
+     first_date    TEXT,
+     last_date     TEXT,
+     cnt_total     INTEGER,
+     PRIMARY KEY (package))", table)
+
+releases_table_ddl <- function(table) sprintf(
+  "CREATE TABLE %s (
+     archive        TEXT,
+     binary_name    TEXT,
+     version        TEXT,
+     pub_id         INTEGER,
+     package        TEXT,
+     origin         TEXT,
+     canonical_name TEXT,
+     cnt_total      INTEGER,
+     last_day       TEXT,
+     done           INTEGER,
+     PRIMARY KEY (archive, binary_name, version))", table)
+
+export_shard <- function(path, daily_df) {
+  if (file.exists(path)) unlink(path)
+  con <- DBI::dbConnect(RSQLite::SQLite(), path)
+  on.exit(DBI::dbDisconnect(con), add = TRUE)
+  DBI::dbExecute(con, "PRAGMA journal_mode=DELETE")
+  DBI::dbExecute(con, daily_table_ddl(DAILY_TABLE))
+  DBI::dbExecute(con, sprintf("CREATE INDEX idx_c2_date ON %s(date)", DAILY_TABLE))
+  if (nrow(daily_df) > 0)
+    DBI::dbWriteTable(con, DAILY_TABLE, daily_df[c("package","date","count")], append = TRUE)
+  DBI::dbExecute(con, "VACUUM")
+  invisible(NULL)
+}
+
+export_summary_shard <- function(path, summary_df) {
+  if (file.exists(path)) unlink(path)
+  con <- DBI::dbConnect(RSQLite::SQLite(), path)
+  on.exit(DBI::dbDisconnect(con), add = TRUE)
+  DBI::dbExecute(con, "PRAGMA journal_mode=DELETE")
+  DBI::dbExecute(con, summary_table_ddl(SUMMARY_TABLE))
+  if (nrow(summary_df) > 0)
+    DBI::dbWriteTable(con, SUMMARY_TABLE, summary_df[SUMMARY_COLS], append = TRUE)
+  DBI::dbExecute(con, "VACUUM")
+  invisible(NULL)
+}
+
+shard_key <- function(package) {
+  c1 <- substr(tolower(package), 1L, 1L)
+  ifelse(grepl("^[a-z]$", c1), c1, "0")
+}
+
+extract_year <- function(con, year) {
+  DBI::dbGetQuery(con, sprintf(
+    "SELECT package,date,count FROM %s WHERE substr(date,1,4)='%04d'", DAILY_TABLE, as.integer(year)))
+}
+
+extract_recent <- function(con, anchor_date, window_days) {
+  cut <- format(as.Date(anchor_date) - window_days, "%Y-%m-%d")
+  DBI::dbGetQuery(con, sprintf(
+    "SELECT package,date,count FROM %s WHERE date >= '%s'", DAILY_TABLE, cut))
+}
