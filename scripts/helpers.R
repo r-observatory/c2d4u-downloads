@@ -91,7 +91,7 @@ resolve_identities <- function(binary_names, cran_map, bioc_map = NULL) {
   pref[startsWith(bn, "r-other-")] <- "other"
   keep <- !is.na(pref)
   bn <- bn[keep]; pref <- pref[keep]
-  token <- sub("^r-(cran|bioc|other)-", "", bn)
+  token <- tolower(sub("^r-(cran|bioc|other)-", "", bn))
 
   canonical <- rep(NA_character_, length(bn))
   is_cran <- pref == "cran"
@@ -101,13 +101,16 @@ resolve_identities <- function(binary_names, cran_map, bioc_map = NULL) {
     canonical[is_cran] <- ifelse(is.na(mapped), token[is_cran], mapped)
   }
   if (any(is_bioc)) {
-    mapped <- if (!is.null(bioc_map)) unname(bioc_map[token[is_bioc]]) else NA_character_
+    mapped <- if (!is.null(bioc_map)) unname(bioc_map[token[is_bioc]]) else rep(NA_character_, sum(is_bioc))
     canonical[is_bioc] <- ifelse(is.na(mapped), token[is_bioc], mapped)
   }
   # origin='other' keeps canonical_name = NA (off the leaderboard).
 
   df <- data.frame(binary_name = bn, package = token, origin = pref,
                    canonical_name = canonical, stringsAsFactors = FALSE)
+  # Keep one row per package token, preferring cran > bioc > other. This must
+  # preserve first-appearance order (a plain order()+!duplicated() would sort
+  # alphabetically and break callers that rely on input order).
   # One origin per token: cran > bioc > other.
   # Keep the highest-rank (lowest value) occurrence of each token in order of first appearance.
   rankv <- match(df$origin, c("cran", "bioc", "other"))
