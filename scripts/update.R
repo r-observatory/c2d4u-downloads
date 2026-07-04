@@ -37,14 +37,15 @@ run_update <- function(io, out_dir, force_full = FALSE) {
     jsonlite::fromJSON(manifest_path, simplifyVector = FALSE) else list()
   prev_shards <- prev$shards %||% list()
 
-  now <- io$now(); today <- as.Date(format(now, "%Y-%m-%d"))
+  now <- io$now(); today <- as.Date(format(now, "%Y-%m-%d", tz = "UTC"))
   roster        <- load_releases(recent_path)
   prior_summary <- load_summary(recent_path)
 
   year_files <- list.files(out_dir, full.names = TRUE,
     pattern = sprintf("^%s-20[0-9]{2}\\.db$", SHARD_PREFIX))
-  daily_hist <- if (length(year_files))
-    do.call(rbind, lapply(year_files, load_daily)) else load_daily(recent_path)
+  # Always union the recent shard as a history floor: a partial year-shard
+  # download must never let a touched year's re-export drop earlier history.
+  daily_hist <- do.call(rbind, c(lapply(year_files, load_daily), list(load_daily(recent_path))))
   daily_hist <- daily_hist[!duplicated(paste(daily_hist$package, daily_hist$date)), , drop = FALSE]
 
   heartbeat <- function(reason) {
@@ -113,7 +114,11 @@ run_update <- function(io, out_dir, force_full = FALSE) {
                day = character(0), count = integer(0), stringsAsFactors = FALSE)
   daily_new <- aggregate_counts(counts_all, roster)
   # Change-gate: a frozen archive with no active releases produces nothing new.
-  if (nrow(daily_new) == 0L && !isTRUE(force_full)) return(heartbeat("no new download data"))
+  # But a cold start with no data must stop, never publish an empty heartbeat.
+  if (nrow(daily_new) == 0L && !isTRUE(force_full)) {
+    if (!io$release_exists()) stop("cold start but no download data was fetched")
+    return(heartbeat("no new download data"))
+  }
   daily_all <- merge_daily(daily_hist, daily_new)
   if (nrow(daily_all) == 0L) return(heartbeat("no daily rows"))
 
@@ -174,12 +179,12 @@ default_io <- function() {
       1L
     },
     fetch = function(url) {
-      with_retry({
+      tryCatch(with_retry({
         h <- curl::new_handle(useragent = USER_AGENT, timeout = 90L, connecttimeout = 20L)
         r <- curl::curl_fetch_memory(url, handle = h)
         if (r$status_code != 200L) stop("HTTP ", r$status_code)
         rawToChar(r$content)
-      })
+      }), error = function(e) NULL)
     },
     cran_names = function() rownames(utils::available.packages(repos = CRAN_REPO)),
     bioc_names = function() {
