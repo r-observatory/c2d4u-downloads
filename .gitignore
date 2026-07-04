@@ -1,0 +1,14 @@
+# Superpowers working artifacts (specs, plans, sdd scratch) - never committed
+docs/superpowers/
+.superpowers/
+
+# Pipeline run outputs and generated shards
+out/
+parts/
+*.db
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
