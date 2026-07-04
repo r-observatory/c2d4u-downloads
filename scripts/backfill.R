@@ -43,9 +43,10 @@ run_fetch_shard <- function(io, out_dir, roster_path, shard) {
     rows <- tryCatch(
       paginate(io$fetch, lp_counts_url(a, r$pub_id), parse_counts_page, "rows"),
       error = function(e) NULL)
-    if (is.null(rows) || nrow(rows) == 0L) { mine$done[i] <- 1L; next }
+    if (is.null(rows)) next            # failed fetch: leave done=0 to retry next run
+    mine$done[i] <- 1L                 # fetched successfully
+    if (nrow(rows) == 0L) next         # fetched, but no downloads recorded
     counts_acc[[length(counts_acc) + 1L]] <- rows
-    mine$done[i] <- 1L
     mine$last_day[i] <- max(rows$day, na.rm = TRUE)
   }
   counts_all <- if (length(counts_acc)) do.call(rbind, counts_acc) else
