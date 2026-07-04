@@ -67,3 +67,58 @@ parse_counts_page <- function(txt) {
   nl <- j$next_collection_link
   list(rows = rows, next_link = if (is.null(nl)) NA_character_ else as.character(nl))
 }
+
+.build_name_map <- function(names) {
+  names <- names[!is.na(names) & nzchar(names)]
+  names <- names[!duplicated(tolower(names))]
+  stats::setNames(names, tolower(names))
+}
+build_cran_map <- function(cran_names) .build_name_map(cran_names)
+build_bioc_map <- function(bioc_names) .build_name_map(bioc_names)
+
+parse_views_packages <- function(views_text) {
+  lines <- unlist(strsplit(views_text, "\n", fixed = TRUE))
+  hits <- grep("^Package:\\s*", lines, value = TRUE)
+  trimws(sub("^Package:\\s*", "", hits))
+}
+
+# Prefix-authoritative origin for c2d4u. Non-r-* names are dropped.
+resolve_identities <- function(binary_names, cran_map, bioc_map = NULL) {
+  bn <- unique(binary_names)
+  pref <- rep(NA_character_, length(bn))
+  pref[startsWith(bn, "r-cran-")]  <- "cran"
+  pref[startsWith(bn, "r-bioc-")]  <- "bioc"
+  pref[startsWith(bn, "r-other-")] <- "other"
+  keep <- !is.na(pref)
+  bn <- bn[keep]; pref <- pref[keep]
+  token <- sub("^r-(cran|bioc|other)-", "", bn)
+
+  canonical <- rep(NA_character_, length(bn))
+  is_cran <- pref == "cran"
+  is_bioc <- pref == "bioc"
+  if (any(is_cran)) {
+    mapped <- unname(cran_map[token[is_cran]])
+    canonical[is_cran] <- ifelse(is.na(mapped), token[is_cran], mapped)
+  }
+  if (any(is_bioc)) {
+    mapped <- if (!is.null(bioc_map)) unname(bioc_map[token[is_bioc]]) else NA_character_
+    canonical[is_bioc] <- ifelse(is.na(mapped), token[is_bioc], mapped)
+  }
+  # origin='other' keeps canonical_name = NA (off the leaderboard).
+
+  df <- data.frame(binary_name = bn, package = token, origin = pref,
+                   canonical_name = canonical, stringsAsFactors = FALSE)
+  # One origin per token: cran > bioc > other.
+  # Keep the highest-rank (lowest value) occurrence of each token in order of first appearance.
+  rankv <- match(df$origin, c("cran", "bioc", "other"))
+  unique_tokens <- unique(df$package)
+  keep_rows <- integer(0)
+  for (t in unique_tokens) {
+    mask <- df$package == t
+    best_idx <- which(mask)[which.min(rankv[mask])]
+    keep_rows <- c(keep_rows, best_idx)
+  }
+  df <- df[keep_rows, , drop = FALSE]
+  rownames(df) <- NULL
+  df
+}
