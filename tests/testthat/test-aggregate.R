@@ -11,6 +11,16 @@ test_that("aggregate_counts sums to package/date via identity", {
   expect_identical(agg$count, c(7L, 5L))  # gsl-bin dropped
 })
 
+test_that("aggregate_counts warns and drops NA day/count rows instead of silently losing them", {
+  counts <- data.frame(binary_name = c("r-cran-a", "r-cran-a"),
+                       version = "v", day = c("2026-05-01", NA),
+                       count = c(3L, 7L), stringsAsFactors = FALSE)
+  ident <- resolve_identities("r-cran-a", build_cran_map("a"), NULL)
+  expect_warning(agg <- aggregate_counts(counts, ident), "NA day/count")
+  expect_identical(agg$date, "2026-05-01")
+  expect_identical(agg$count, 3L)
+})
+
 test_that("merge_daily upserts new rows over old and preserves untouched history", {
   old <- data.frame(package = c("a","a","b"), date = c("2026-01-01","2026-03-01","2026-03-01"),
                     count = c(1L,3L,5L), stringsAsFactors = FALSE)
