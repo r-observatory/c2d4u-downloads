@@ -1,0 +1,6 @@
+{"start":0,"total_size":3,"next_collection_link":null,
+ "entries":[
+  {"binary_package_name":"r-cran-ggplot2","binary_package_version":"3.4.4-1cran1.2204.0","day":"2026-05-04","count":12,"country_link":null},
+  {"binary_package_name":"r-cran-ggplot2","binary_package_version":"3.4.4-1cran1.2204.0","day":"2026-05-01","count":7,"country_link":"https://api.launchpad.net/1.0/countries/US"},
+  {"binary_package_name":"r-cran-ggplot2","binary_package_version":"3.4.4-1cran1.2204.0","day":"2026-04-23","count":124,"country_link":null}
+ ]}
