@@ -1,0 +1,12 @@
+{"start":0,"total_size":2,
+ "next_collection_link":"https://api.launchpad.net/1.0/~c2d4u.team/+archive/ubuntu/c2d4u4.0+?ws.op=getPublishedBinaries&ws.size=1&memo=1&ws.start=1",
+ "entries":[
+  {"self_link":"https://api.launchpad.net/1.0/~c2d4u.team/+archive/ubuntu/c2d4u4.0+/+binarypub/198161808",
+   "binary_package_name":"r-cran-ggplot2","binary_package_version":"3.4.4-1cran1.2204.0",
+   "source_package_name":"ggplot2","distro_arch_series_link":"https://api.launchpad.net/1.0/ubuntu/jammy/amd64",
+   "status":"Published","date_published":"2023-10-17T00:00:00+00:00"},
+  {"self_link":"https://api.launchpad.net/1.0/~c2d4u.team/+archive/ubuntu/c2d4u4.0+/+binarypub/191368536",
+   "binary_package_name":"gsl-bin","binary_package_version":"2.5-1",
+   "source_package_name":"gsl","distro_arch_series_link":"https://api.launchpad.net/1.0/ubuntu/bionic/s390x",
+   "status":"Superseded","date_published":"2020-04-15T00:00:00+00:00"}
+ ]}
