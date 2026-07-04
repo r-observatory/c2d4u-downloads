@@ -259,7 +259,7 @@ build_summary <- function(daily_con, identity_df, anchor_date, prior_summary = N
       SUM(CASE WHEN date >= date('%1$s','-90 days')  THEN count ELSE 0 END) AS total_90d,
       SUM(CASE WHEN date >= date('%1$s','-365 days') THEN count ELSE 0 END) AS total_365d,
       SUM(CASE WHEN date >  date('%1$s','-60 days')
-                AND date <= date('%1$s','-30 days') THEN count ELSE 0 END) AS prev_30d
+                AND date <  date('%1$s','-30 days') THEN count ELSE 0 END) AS prev_30d
     FROM %2$s GROUP BY package", a, DAILY_TABLE))
 
   if (nrow(agg) == 0L && is.null(prior_summary)) return(empty_summary())
@@ -435,18 +435,14 @@ dedup_releases <- function(entries) {
   e
 }
 
-.empty_roster_entries <- function() {
-  cbind(archive = character(0),
-        data.frame(pub_id = integer(0), binary_name = character(0),
-                   version = character(0), arch = character(0),
-                   status = character(0), date_published = character(0),
-                   stringsAsFactors = FALSE))
-}
-
 build_roster <- function(entries, cran_map, bioc_map = NULL) {
   d <- dedup_releases(entries)
   if (nrow(d) == 0L) return(.empty_releases())
   ident <- resolve_identities(d$binary_name, cran_map, bioc_map)  # drops toolchain, one origin per token
+  # Note: resolve_identities keeps one binary per package token (cran > bioc >
+  # other). If the same token exists under two prefixes (rare; CRAN/Bioc names
+  # are mostly disjoint), the losing binary is dropped and its counts are not
+  # summed under that token.
   ib <- match(d$binary_name, ident$binary_name)
   keep <- !is.na(ib)
   d <- d[keep, , drop = FALSE]; ib <- ib[keep]

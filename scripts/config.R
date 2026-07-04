@@ -14,6 +14,9 @@ ARCHIVES <- list(
 
 PAGE_SIZE            <- 300L   # Launchpad max ws.size
 FETCH_POOL           <- 4L     # concurrent GET pool size (polite)
+# INVARIANT (load-bearing for protect-history): RECENT_WINDOW_DAYS must exceed
+# ACTIVE_WINDOW_DAYS + REVISION_WINDOW_DAYS so the recent-shard history floor
+# always covers every re-fetched (active) release's earliest returned day.
 RECENT_WINDOW_DAYS   <- 400L   # rolling recent shard window
 ACTIVE_WINDOW_DAYS   <- 180L   # a release is "active" (re-fetched monthly) if its last_day is within this
 REVISION_WINDOW_DAYS <- 90L    # trailing days re-fetched each refresh to absorb Launchpad's ~60-day lag

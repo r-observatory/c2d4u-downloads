@@ -33,3 +33,16 @@ test_that("build_summary carries forward inactive prior packages", {
   expect_identical(s$cnt_total[s$package == "oldpkg"], 42L)
   expect_identical(s$first_date[s$package == "oldpkg"], "2020-01-01")
 })
+
+test_that("build_summary does not double-count the -30 day in the trend prev window", {
+  df <- data.frame(package = "ggplot2",
+                   date = c("2026-05-16", "2026-05-31"),  # anchor-45 (prev) and anchor-30 (boundary)
+                   count = c(50L, 100L), stringsAsFactors = FALSE)
+  con <- mk_daily_con(df); on.exit(DBI::dbDisconnect(con))
+  ident <- resolve_identities("r-cran-ggplot2", build_cran_map("ggplot2"), NULL)
+  s <- build_summary(con, ident, anchor_date = "2026-06-30")
+  # total_30d includes the boundary day (100); prev window is the 50 only, so
+  # trend = (100/50 - 1) * 100 = 100. With the old <= bound prev would be 150.
+  expect_identical(s$total_30d, 100L)
+  expect_identical(s$trend, 100)
+})
