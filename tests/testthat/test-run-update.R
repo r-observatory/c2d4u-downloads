@@ -62,3 +62,32 @@ test_that("no active releases and no source yields a frozen heartbeat", {
   expect_identical(res$changed_shards, character(0))
   expect_identical(res$manifest$source_kind, "frozen")
 })
+
+test_that("a partial year-shard download does not drop earlier history from a touched year", {
+  pub <- withr::local_tempdir(); out <- withr::local_tempdir()
+  a <- ARCHIVES[[1]]
+  writeLines('{"source_kind":"launchpad","shards":{}}', file.path(pub, "manifest.json"))
+  rp <- file.path(pub, "c2d4u-downloads-recent.db")
+  export_shard(rp, data.frame(package = "ggplot2", date = "2026-03-01", count = 5L,
+                              stringsAsFactors = FALSE))
+  s <- empty_summary()
+  s[1, ] <- list("ggplot2","ggplot2","cran","ggplot2",5L,5L,5L,1L,1L,1L,0.17,NA,"2026-03-01","2026-03-01",5L)
+  rel <- data.frame(archive = "c2d4u4.0+", binary_name = "r-cran-ggplot2", version = "3.4.4",
+                    pub_id = 10L, package = "ggplot2", origin = "cran", canonical_name = "ggplot2",
+                    cnt_total = 5L, last_day = "2026-03-01", done = 1L, stringsAsFactors = FALSE)
+  embed_aux(rp, s, rel)
+  # A 2025 year shard is present but the 2026 year shard is (simulated) missing.
+  export_shard(file.path(pub, "c2d4u-downloads-2025.db"),
+               data.frame(package = "ggplot2", date = "2025-06-01", count = 2L, stringsAsFactors = FALSE))
+  sd <- format(as.Date("2026-03-01") - REVISION_WINDOW_DAYS, "%Y-%m-%d")
+  pages <- list()
+  pages[[lp_counts_url(a, 10L, start_date = sd)]] <-
+    '{"start":0,"total_size":1,"next_collection_link":null,"entries":[
+      {"binary_package_name":"r-cran-ggplot2","binary_package_version":"3.4.4","day":"2026-06-15","count":3}]}'
+  res <- run_update(fake_io(pub, pages, cran = "ggplot2"), out)
+  con <- DBI::dbConnect(RSQLite::SQLite(), file.path(out, "c2d4u-downloads-2026.db"))
+  on.exit(DBI::dbDisconnect(con))
+  got <- DBI::dbGetQuery(con, "SELECT date, count FROM c2d4u_downloads_daily ORDER BY date")
+  expect_true("2026-03-01" %in% got$date)  # earlier-in-year history preserved via the recent floor
+  expect_true("2026-06-15" %in% got$date)  # new data present
+})
