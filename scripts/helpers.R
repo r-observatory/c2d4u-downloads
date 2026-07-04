@@ -366,3 +366,33 @@ write_release_notes <- function(path, manifest) {
              "```")
   writeLines(lines, path)
 }
+
+embed_aux <- function(recent_path, summary_df, releases_df) {
+  con <- DBI::dbConnect(RSQLite::SQLite(), recent_path)
+  on.exit(DBI::dbDisconnect(con), add = TRUE)
+  DBI::dbExecute(con, sprintf("DROP TABLE IF EXISTS %s", SUMMARY_TABLE))
+  DBI::dbExecute(con, summary_table_ddl(SUMMARY_TABLE))
+  if (nrow(summary_df) > 0) DBI::dbWriteTable(con, SUMMARY_TABLE, summary_df[SUMMARY_COLS], append = TRUE)
+  DBI::dbExecute(con, sprintf("DROP TABLE IF EXISTS %s", RELEASES_TABLE))
+  DBI::dbExecute(con, releases_table_ddl(RELEASES_TABLE))
+  if (nrow(releases_df) > 0)
+    DBI::dbWriteTable(con, RELEASES_TABLE,
+      releases_df[c("archive","binary_name","version","pub_id","package",
+                    "origin","canonical_name","cnt_total","last_day","done")], append = TRUE)
+  invisible(NULL)
+}
+
+.empty_releases <- function() {
+  data.frame(archive = character(0), binary_name = character(0), version = character(0),
+             pub_id = integer(0), package = character(0), origin = character(0),
+             canonical_name = character(0), cnt_total = integer(0),
+             last_day = character(0), done = integer(0), stringsAsFactors = FALSE)
+}
+
+load_releases <- function(path) {
+  if (!file.exists(path)) return(.empty_releases())
+  con <- DBI::dbConnect(RSQLite::SQLite(), path)
+  on.exit(DBI::dbDisconnect(con), add = TRUE)
+  if (!RELEASES_TABLE %in% DBI::dbListTables(con)) return(.empty_releases())
+  DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", RELEASES_TABLE))
+}
