@@ -38,3 +38,10 @@ test_that("resolve_identities dedupes a token to one origin (cran wins)", {
   expect_identical(nrow(out), 1L)
   expect_identical(out$origin, "cran")
 })
+
+test_that("resolve_identities does not recycle canonical when bioc_map is NULL", {
+  out <- resolve_identities(c("r-bioc-foo", "r-bioc-bar"),
+                            build_cran_map(character(0)), NULL)
+  expect_identical(out$canonical_name, c("foo", "bar"))
+  expect_identical(out$origin, c("bioc", "bioc"))
+})
