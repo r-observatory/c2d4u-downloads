@@ -396,3 +396,87 @@ load_releases <- function(path) {
   if (!RELEASES_TABLE %in% DBI::dbListTables(con)) return(.empty_releases())
   DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", RELEASES_TABLE))
 }
+
+paginate <- function(fetch, first_url, parse_fn, field) {
+  acc <- list(); url <- first_url; guard <- 0L
+  while (length(url) == 1L && !is.na(url)) {
+    guard <- guard + 1L
+    if (guard > 100000L) stop("paginate: runaway paging")
+    txt <- fetch(url)
+    if (is.null(txt)) stop("paginate: fetch failed for ", url)
+    pr <- parse_fn(txt)
+    acc[[length(acc) + 1L]] <- pr[[field]]
+    url <- pr$next_link
+  }
+  if (length(acc) == 0L) return(NULL)
+  do.call(rbind, acc)
+}
+
+enumerate_archive <- function(fetch, archive) {
+  ent <- paginate(fetch, lp_published_url(archive), parse_published_page, "entries")
+  if (is.null(ent) || nrow(ent) == 0L) {
+    return(cbind(archive = character(0),
+                 data.frame(pub_id = integer(0), binary_name = character(0),
+                            version = character(0), arch = character(0),
+                            status = character(0), date_published = character(0),
+                            stringsAsFactors = FALSE)))
+  }
+  cbind(archive = archive$key, ent, stringsAsFactors = FALSE)
+}
+
+dedup_releases <- function(entries) {
+  if (nrow(entries) == 0L) return(entries)
+  ord <- order(entries$archive, entries$binary_name, entries$version,
+               entries$arch != "amd64")   # amd64 sorts first
+  e <- entries[ord, , drop = FALSE]
+  key <- paste(e$archive, e$binary_name, e$version)
+  e <- e[!duplicated(key), , drop = FALSE]
+  rownames(e) <- NULL
+  e
+}
+
+.empty_roster_entries <- function() {
+  cbind(archive = character(0),
+        data.frame(pub_id = integer(0), binary_name = character(0),
+                   version = character(0), arch = character(0),
+                   status = character(0), date_published = character(0),
+                   stringsAsFactors = FALSE))
+}
+
+build_roster <- function(entries, cran_map, bioc_map = NULL) {
+  d <- dedup_releases(entries)
+  if (nrow(d) == 0L) return(.empty_releases())
+  ident <- resolve_identities(d$binary_name, cran_map, bioc_map)  # drops toolchain, one origin per token
+  ib <- match(d$binary_name, ident$binary_name)
+  keep <- !is.na(ib)
+  d <- d[keep, , drop = FALSE]; ib <- ib[keep]
+  data.frame(
+    archive = d$archive, binary_name = d$binary_name, version = d$version,
+    pub_id = as.integer(d$pub_id), package = ident$package[ib],
+    origin = ident$origin[ib], canonical_name = ident$canonical_name[ib],
+    cnt_total = NA_integer_, last_day = NA_character_, done = 0L,
+    stringsAsFactors = FALSE)
+}
+
+archive_by_key <- function(key) {
+  for (a in ARCHIVES) if (identical(a$key, key)) return(a)
+  NULL
+}
+
+load_daily <- function(path) {
+  empty <- data.frame(package = character(0), date = character(0),
+                      count = integer(0), stringsAsFactors = FALSE)
+  if (!file.exists(path)) return(empty)
+  con <- DBI::dbConnect(RSQLite::SQLite(), path)
+  on.exit(DBI::dbDisconnect(con), add = TRUE)
+  if (!DAILY_TABLE %in% DBI::dbListTables(con)) return(empty)
+  DBI::dbGetQuery(con, sprintf("SELECT package,date,count FROM %s", DAILY_TABLE))
+}
+
+load_summary <- function(path) {
+  if (!file.exists(path)) return(empty_summary())
+  con <- DBI::dbConnect(RSQLite::SQLite(), path)
+  on.exit(DBI::dbDisconnect(con), add = TRUE)
+  if (!SUMMARY_TABLE %in% DBI::dbListTables(con)) return(empty_summary())
+  DBI::dbGetQuery(con, sprintf("SELECT %s FROM %s", paste(SUMMARY_COLS, collapse = ","), SUMMARY_TABLE))
+}
