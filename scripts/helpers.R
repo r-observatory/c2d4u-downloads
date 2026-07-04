@@ -239,3 +239,71 @@ extract_recent <- function(con, anchor_date, window_days) {
   DBI::dbGetQuery(con, sprintf(
     "SELECT package,date,count FROM %s WHERE date >= '%s'", DAILY_TABLE, cut))
 }
+
+empty_summary <- function() {
+  data.frame(package = character(0), package_lower = character(0),
+             origin = character(0), canonical_name = character(0),
+             total_30d = integer(0), total_90d = integer(0), total_365d = integer(0),
+             rank_30d = integer(0), rank_90d = integer(0), rank_365d = integer(0),
+             avg_daily_30d = numeric(0), trend = numeric(0),
+             first_date = character(0), last_date = character(0),
+             cnt_total = integer(0), stringsAsFactors = FALSE)
+}
+
+build_summary <- function(daily_con, identity_df, anchor_date, prior_summary = NULL) {
+  a <- format(as.Date(anchor_date), "%Y-%m-%d")
+  agg <- DBI::dbGetQuery(daily_con, sprintf("
+    SELECT package,
+      MIN(date) AS first_date, MAX(date) AS last_date, SUM(count) AS cnt_total,
+      SUM(CASE WHEN date >= date('%1$s','-30 days')  THEN count ELSE 0 END) AS total_30d,
+      SUM(CASE WHEN date >= date('%1$s','-90 days')  THEN count ELSE 0 END) AS total_90d,
+      SUM(CASE WHEN date >= date('%1$s','-365 days') THEN count ELSE 0 END) AS total_365d,
+      SUM(CASE WHEN date >  date('%1$s','-60 days')
+                AND date <= date('%1$s','-30 days') THEN count ELSE 0 END) AS prev_30d
+    FROM %2$s GROUP BY package", a, DAILY_TABLE))
+
+  if (nrow(agg) == 0L && is.null(prior_summary)) return(empty_summary())
+
+  agg$package_lower <- tolower(agg$package)
+  agg$avg_daily_30d <- round(agg$total_30d / 30, 2)
+  agg$trend <- ifelse(!is.na(agg$prev_30d) & agg$prev_30d > 0,
+                      round((agg$total_30d / agg$prev_30d - 1) * 100, 2), NA_real_)
+  # The roster has one row per (binary,version); collapse to one identity per
+  # package token before joining so the aggregate is not fanned out.
+  id1 <- identity_df[!duplicated(identity_df$package), c("package","origin","canonical_name")]
+  agg <- merge(agg, id1, by = "package", all.x = TRUE)
+  agg$origin <- ifelse(is.na(agg$origin), "other", agg$origin)
+
+  for (col in c("total_30d","total_90d","total_365d","cnt_total"))
+    agg[[col]] <- as.integer(agg[[col]])
+
+  cur <- agg[c("package","package_lower","origin","canonical_name",
+               "total_30d","total_90d","total_365d","avg_daily_30d","trend",
+               "first_date","last_date","cnt_total")]
+
+  # Merge-forward: prior packages absent this run keep identity + first_date +
+  # last_date + cnt_total, with zeroed current windows.
+  if (!is.null(prior_summary) && nrow(prior_summary) > 0) {
+    gone <- prior_summary[!prior_summary$package %in% cur$package, , drop = FALSE]
+    if (nrow(gone) > 0) {
+      carry <- data.frame(
+        package = gone$package, package_lower = gone$package_lower,
+        origin = gone$origin, canonical_name = gone$canonical_name,
+        total_30d = 0L, total_90d = 0L, total_365d = 0L,
+        avg_daily_30d = 0, trend = NA_real_,
+        first_date = gone$first_date, last_date = gone$last_date,
+        cnt_total = as.integer(gone$cnt_total), stringsAsFactors = FALSE)
+      cur <- rbind(cur, carry)
+    }
+    # Preserve the earliest first_date ever seen for surviving packages.
+    fd <- prior_summary$first_date[match(cur$package, prior_summary$package)]
+    cur$first_date <- pmin(cur$first_date, ifelse(is.na(fd), cur$first_date, fd))
+  }
+
+  cur$rank_30d  <- as.integer(rank(-cur$total_30d,  ties.method = "min"))
+  cur$rank_90d  <- as.integer(rank(-cur$total_90d,  ties.method = "min"))
+  cur$rank_365d <- as.integer(rank(-cur$total_365d, ties.method = "min"))
+  cur <- cur[order(cur$rank_30d, cur$package), , drop = FALSE]
+  rownames(cur) <- NULL
+  cur[SUMMARY_COLS]
+}
