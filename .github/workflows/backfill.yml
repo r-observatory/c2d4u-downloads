@@ -9,7 +9,10 @@ concurrency:
 jobs:
   enumerate:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # The whole-archive getPublishedBinaries sweep is sequential (Launchpad 503s
+    # on deep offset jumps, so it cannot be sharded) at ~8s/page over ~1,100
+    # pages, so allow well beyond the ~2.5h it takes.
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
       - uses: r-lib/actions/setup-r@v2
