@@ -1,7 +1,14 @@
 # Sharded one-time bootstrap. Three entrypoints wired together by backfill.yml:
-#   enumerate  -> build the full release roster (one job)
-#   fetch      -> fetch getDownloadCounts for one first-character shard (matrix)
+#   enumerate  -> build the full release roster via the NAME-LIST method (one job)
+#   fetch      -> fetch getDownloadCounts for one EVEN mod-N shard (matrix)
 #   merge      -> fold all shard partials into the published shards (one job)
+#
+# ENUMERATE uses cheap per-package-name filtered queries, not the whole-archive
+# getPublishedBinaries sweep (that 503s past ~12,900 entries and is impossible).
+# The name universe is current CRAN + the CRAN Archive index + Bioc VIEWS; each
+# candidate r-cran-<name> / r-bioc-<name> is queried through the concurrent
+# fetch_pool. FETCH shards the roster EVENLY by row index modulo N (first-letter
+# buckets are wildly uneven) and fetches its slice concurrently.
 
 if (!exists("SHARD_PREFIX")) source(file.path("scripts", "config.R"))
 if (!exists("build_roster")) source(file.path("scripts", "helpers.R"))
@@ -24,30 +31,46 @@ write_roster <- function(path, roster_df) {
 
 run_enumerate <- function(io, out_dir) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
-  maps <- list(cran = build_cran_map(io$cran_names()),
-               bioc = if (isTRUE(LOAD_BIOC_MAP)) build_bioc_map(io$bioc_names()) else NULL)
+  cran <- io$cran_names()
+  bioc <- if (isTRUE(LOAD_BIOC_MAP)) io$bioc_names() else character(0)
+  archive <- io$archive_names()
+  maps <- list(cran = build_cran_map(cran),
+               bioc = if (isTRUE(LOAD_BIOC_MAP)) build_bioc_map(bioc) else NULL)
+  cand <- candidate_binary_names(cran, archive, bioc)
+  message(sprintf("enumerate: name universe CRAN=%d CRAN-archive=%d Bioc=%d -> %d candidate names",
+                  length(cran), length(archive), length(bioc), length(cand)))
   enabled <- Filter(function(a) isTRUE(a$enabled), ARCHIVES)
-  ent <- do.call(rbind, lapply(enabled, function(a) enumerate_archive(io$fetch, a)))
+  ent <- do.call(rbind, lapply(enabled, function(a) enumerate_names(io$fetch_many, cand, a)))
   roster <- if (is.null(ent) || nrow(ent) == 0L) .empty_releases()
             else build_roster(ent, maps$cran, maps$bioc)
+  message(sprintf("enumerate: %d releases across %d packages",
+                  nrow(roster), length(unique(roster$package))))
   write_roster(file.path(out_dir, ROSTER_FILE), roster)
 }
 
-run_fetch_shard <- function(io, out_dir, roster_path, shard) {
+# Fetch getDownloadCounts for the roster's EVEN shard i-of-N (row index modulo N)
+# concurrently through io$fetch_many. Writes the same partial shard db (daily +
+# roster slice) that run_merge consumes.
+run_fetch_shard <- function(io, out_dir, roster_path, i, N) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   roster <- load_releases(roster_path)
-  mine <- roster[shard_key(roster$package) == shard, , drop = FALSE]
+  mine <- roster[shard_rows(nrow(roster), i, N), , drop = FALSE]
+  message(sprintf("fetch shard %d/%d: %d of %d releases", i, N, nrow(mine), nrow(roster)))
+
+  urls <- if (nrow(mine) == 0L) character(0)
+          else vapply(seq_len(nrow(mine)),
+            function(k) lp_counts_url(archive_by_key(mine$archive[k]), mine$pub_id[k]),
+            character(1))
+  res <- fetch_paginated(io$fetch_many, urls, parse_counts_page, "rows")
+
   counts_acc <- list()
-  for (i in seq_len(nrow(mine))) {
-    r <- mine[i, ]; a <- archive_by_key(r$archive)
-    rows <- tryCatch(
-      paginate(io$fetch, lp_counts_url(a, r$pub_id), parse_counts_page, "rows"),
-      error = function(e) NULL)
-    if (is.null(rows)) next            # failed fetch: leave done=0 to retry next run
-    mine$done[i] <- 1L                 # fetched successfully
-    if (nrow(rows) == 0L) next         # fetched, but no downloads recorded
+  for (k in seq_len(nrow(mine))) {
+    if (!isTRUE(res$ok[k])) next       # failed fetch: leave done=0 to retry next run
+    mine$done[k] <- 1L                 # fetched successfully
+    rows <- res$data[[k]]
+    if (is.null(rows) || nrow(rows) == 0L) next   # fetched, but no downloads recorded
     counts_acc[[length(counts_acc) + 1L]] <- rows
-    mine$last_day[i] <- max(rows$day, na.rm = TRUE)
+    mine$last_day[k] <- max(rows$day, na.rm = TRUE)
   }
   counts_all <- if (length(counts_acc)) do.call(rbind, counts_acc) else
     data.frame(binary_name = character(0), version = character(0),
@@ -58,7 +81,7 @@ run_fetch_shard <- function(io, out_dir, roster_path, shard) {
     tot <- stats::aggregate(count ~ package, data = daily, FUN = sum)
     mine$cnt_total <- as.integer(tot$count[match(mine$package, tot$package)])
   }
-  sp <- file.path(out_dir, sprintf("%s-shard-%s.db", SHARD_PREFIX, shard))
+  sp <- file.path(out_dir, sprintf("%s-shard-%d.db", SHARD_PREFIX, i))
   export_shard(sp, daily)
   # attach the roster slice so merge can reassemble state
   con <- DBI::dbConnect(RSQLite::SQLite(), sp); on.exit(DBI::dbDisconnect(con), add = TRUE)
@@ -66,6 +89,8 @@ run_fetch_shard <- function(io, out_dir, roster_path, shard) {
   cols <- c("archive","binary_name","version","pub_id","package",
             "origin","canonical_name","cnt_total","last_day","done")
   if (nrow(mine) > 0) DBI::dbWriteTable(con, RELEASES_TABLE, mine[cols], append = TRUE)
+  message(sprintf("fetch shard %d/%d: %d daily rows, %d releases fetched",
+                  i, N, nrow(daily), sum(mine$done)))
   sp
 }
 
@@ -123,8 +148,11 @@ if (sys.nframe() == 0L) {
   if (mode == "enumerate") {
     run_enumerate(io, out_dir)
   } else if (mode == "fetch") {
-    shard <- Sys.getenv("C2D4U_SHARD")
-    run_fetch_shard(io, out_dir, file.path(Sys.getenv("C2D4U_ROSTER", out_dir), ROSTER_FILE), shard)
+    i <- suppressWarnings(as.integer(Sys.getenv("C2D4U_SHARD_I", "0")))
+    N <- suppressWarnings(as.integer(Sys.getenv("C2D4U_SHARD_N", "1")))
+    if (is.na(i) || is.na(N) || N < 1L || i < 0L || i >= N)
+      stop("fetch: C2D4U_SHARD_I must be in [0, C2D4U_SHARD_N)")
+    run_fetch_shard(io, out_dir, file.path(Sys.getenv("C2D4U_ROSTER", out_dir), ROSTER_FILE), i, N)
   } else if (mode == "merge") {
     run_merge(io, out_dir, Sys.getenv("C2D4U_PARTS", "parts"))
   } else stop("usage: backfill.R [enumerate|fetch|merge]")

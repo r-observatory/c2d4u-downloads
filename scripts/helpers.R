@@ -418,6 +418,140 @@ paginate <- function(fetch, first_url, parse_fn, field) {
   do.call(rbind, acc)
 }
 
+# ---------------------------------------------------------------------------
+# CONCURRENCY POOL (backfill). Fetch every url with a bounded curl::multi pool,
+# then make several retry passes over the failed/NULL indices with growing
+# sleeps so a 503 wave is ridden out rather than dropping data. Returns a list
+# aligned to `urls`: the response body string on HTTP 200, NULL otherwise.
+fetch_pool <- function(urls, pool = POOL, passes = FETCH_PASSES, block = 1500L) {
+  out <- vector("list", length(urls))
+  n <- length(urls)
+  if (n == 0L) return(out)
+  run <- function(idxs) {
+    for (s in seq(1L, length(idxs), by = block)) {
+      e   <- min(s + block - 1L, length(idxs))
+      sel <- idxs[s:e]
+      p   <- curl::new_pool(total_con = pool, host_con = pool)
+      for (j in sel) {
+        local({
+          jj <- j
+          h <- curl::new_handle(useragent = USER_AGENT, timeout = 90L, connecttimeout = 20L)
+          curl::handle_setopt(h, url = urls[jj])
+          curl::multi_add(h,
+            done = function(res) if (isTRUE(res$status_code == 200L)) out[[jj]] <<- rawToChar(res$content),
+            fail = function(err) invisible(NULL),
+            pool = p)
+        })
+      }
+      curl::multi_run(pool = p)
+    }
+  }
+  run(seq_len(n))
+  for (k in seq_len(passes - 1L)) {
+    failed <- which(vapply(out, is.null, logical(1)))
+    if (length(failed) == 0L) break
+    Sys.sleep(3 * k)   # growing backoff between passes
+    run(failed)
+  }
+  out
+}
+
+# Fetch a set of first-page urls through `fetch_many` (a urls -> list-of-bodies
+# function, e.g. fetch_pool or a test fake), parse each with parse_fn, and follow
+# next_collection_link concurrently until every item is exhausted. Only a handful
+# of names/releases exceed one page, so later waves shrink quickly. Returns
+# list(data = per-item field data.frame or partial/NULL, ok = logical: TRUE only
+# where the item fully completed with no failed page).
+fetch_paginated <- function(fetch_many, first_urls, parse_fn, field) {
+  n <- length(first_urls)
+  acc <- vector("list", n)         # accumulated field rows per item
+  ok  <- logical(n)                # settled-complete flag per item
+  cur <- first_urls                # current url to fetch per item
+  active <- seq_len(n)
+  guard <- 0L
+  while (length(active) > 0L) {
+    guard <- guard + 1L
+    if (guard > 100000L) stop("fetch_paginated: runaway paging")
+    bodies <- fetch_many(cur[active])
+    nxt <- integer(0)
+    for (m in seq_along(active)) {
+      i <- active[m]; body <- bodies[[m]]
+      if (is.null(body)) next          # failed page -> item stays ok=FALSE
+      pr <- tryCatch(parse_fn(body), error = function(e) NULL)
+      if (is.null(pr)) next
+      acc[[i]] <- if (is.null(acc[[i]])) pr[[field]] else rbind(acc[[i]], pr[[field]])
+      nl <- pr$next_link
+      if (length(nl) == 1L && !is.na(nl)) { cur[i] <- nl; nxt <- c(nxt, i) }
+      else ok[i] <- TRUE
+    }
+    active <- nxt
+  }
+  list(data = acc, ok = ok)
+}
+
+# ---------------------------------------------------------------------------
+# NAME-LIST ENUMERATION. The whole-archive getPublishedBinaries sweep is
+# impossible (Launchpad 503s past ~12,900 entries). Instead enumerate the roster
+# with cheap, reliable per-package-name filtered queries.
+
+# The per-name filtered query. ordered=false + exact_match=true is a cheap index
+# lookup (~1s, no 503s), unlike the ordered deep-offset whole-archive sweep.
+lp_name_query_url <- function(archive, binary_name, size = PAGE_SIZE) {
+  sprintf("%s?ws.op=getPublishedBinaries&binary_name=%s&exact_match=true&ordered=false&ws.size=%d",
+          lp_archive_ref(archive), curl::curl_escape(binary_name), as.integer(size))
+}
+
+# Parse the CRAN src/contrib/Archive/ directory listing into package names.
+parse_archive_index <- function(html) {
+  if (is.null(html) || !nzchar(html)) return(character(0))
+  m <- regmatches(html, gregexpr('href="([^"/]+)/"', html))[[1]]
+  nm <- sub('href="([^"/]+)/"', "\\1", m)
+  nm[!nm %in% c("..", ".") & nzchar(nm)]
+}
+
+# The candidate binary-name universe: current CRAN + every ever-archived CRAN
+# package -> r-cran-<lower>, and Bioc VIEWS packages -> r-bioc-<lower>.
+candidate_binary_names <- function(cran_names, archive_names, bioc_names = character(0)) {
+  clean <- function(x) { x <- x[!is.na(x)]; unique(x[nzchar(x)]) }
+  # paste0() recycles a zero-length arg to "", so only prefix non-empty vectors.
+  pref  <- function(p, x) if (length(x)) paste0(p, tolower(x)) else character(0)
+  unique(c(pref("r-cran-", clean(c(cran_names, archive_names))),
+           pref("r-bioc-", clean(bioc_names))))
+}
+
+# Enumerate every candidate name for one archive via the per-name filtered query
+# through `fetch_many` (concurrent). Names that 503 or 404 simply contribute no
+# rows. Returns entries tagged with the archive key (empty-with-archive if none).
+enumerate_names <- function(fetch_many, candidates, archive, batch = ENUM_BATCH) {
+  empty <- cbind(archive = character(0),
+    data.frame(pub_id = integer(0), binary_name = character(0),
+               version = character(0), arch = character(0),
+               status = character(0), date_published = character(0),
+               stringsAsFactors = FALSE))
+  if (length(candidates) == 0L) return(empty)
+  acc <- list()
+  batches <- split(candidates, ceiling(seq_along(candidates) / batch))
+  for (nm in batches) {
+    urls <- vapply(nm, function(x) lp_name_query_url(archive, x), character(1))
+    res <- fetch_paginated(fetch_many, urls, parse_published_page, "entries")
+    got <- res$ok
+    if (any(got)) {
+      ent_list <- res$data[got]
+      ent <- do.call(rbind, ent_list[!vapply(ent_list, is.null, logical(1))])
+      if (!is.null(ent) && nrow(ent) > 0L) acc[[length(acc) + 1L]] <- ent
+    }
+  }
+  if (length(acc) == 0L) return(empty)
+  cbind(archive = archive$key, do.call(rbind, acc), stringsAsFactors = FALSE)
+}
+
+# EVEN sharding by row index modulo N (first-letter buckets are very uneven).
+# Shard i owns roster rows where ((rownumber - 1) %% N) == i.
+shard_rows <- function(n, i, N) {
+  if (n == 0L || N <= 0L) return(integer(0))
+  which(((seq_len(n) - 1L) %% N) == i)
+}
+
 enumerate_archive <- function(fetch, archive) {
   ent <- paginate(fetch, lp_published_url(archive), parse_published_page, "entries")
   if (is.null(ent) || nrow(ent) == 0L) {

@@ -9,9 +9,10 @@ concurrency:
 jobs:
   enumerate:
     runs-on: ubuntu-latest
-    # The whole-archive getPublishedBinaries sweep is sequential (Launchpad 503s
-    # on deep offset jumps, so it cannot be sharded) at ~8s/page over ~1,100
-    # pages, so allow well beyond the ~2.5h it takes.
+    # The name-list enumerate queries each candidate binary name (current CRAN +
+    # the CRAN Archive index + Bioc VIEWS, ~36k names) with a cheap filtered
+    # getPublishedBinaries call through the concurrent fetch pool. A lone job, so
+    # a larger pool is safe; the local run was reliable at 16.
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
@@ -28,12 +29,13 @@ jobs:
             any::withr
       - name: Run unit tests
         run: Rscript tests/testthat.R
-      - name: Enumerate roster
+      - name: Enumerate roster (name-list method)
         run: |
           mkdir -p out
           Rscript scripts/backfill.R enumerate
         env:
           C2D4U_OUT: out
+          C2D4U_POOL: "16"
       - uses: actions/upload-artifact@v4
         with:
           name: roster
@@ -45,9 +47,11 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      max-parallel: 8
+      # THROTTLE CAP: Launchpad throttles above ~16-24 aggregate connections.
+      # Keep max-parallel * C2D4U_POOL <= ~24 (here 4 * 6 = 24).
+      max-parallel: 4
       matrix:
-        shard: [a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,w,x,y,z,"0"]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     steps:
       - uses: actions/checkout@v4
       - uses: r-lib/actions/setup-r@v2
@@ -63,14 +67,16 @@ jobs:
             any::withr
       - uses: actions/download-artifact@v4
         with: { name: roster, path: roster }
-      - name: Fetch shard ${{ matrix.shard }}
+      - name: Fetch shard ${{ matrix.shard }} of 12
         run: |
           mkdir -p out
           Rscript scripts/backfill.R fetch
         env:
           C2D4U_OUT: out
           C2D4U_ROSTER: roster
-          C2D4U_SHARD: ${{ matrix.shard }}
+          C2D4U_SHARD_I: ${{ matrix.shard }}
+          C2D4U_SHARD_N: "12"
+          C2D4U_POOL: "6"
       - uses: actions/upload-artifact@v4
         with:
           name: shard-${{ matrix.shard }}
