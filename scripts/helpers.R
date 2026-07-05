@@ -515,8 +515,13 @@ candidate_binary_names <- function(cran_names, archive_names, bioc_names = chara
   clean <- function(x) { x <- x[!is.na(x)]; unique(x[nzchar(x)]) }
   # paste0() recycles a zero-length arg to "", so only prefix non-empty vectors.
   pref  <- function(p, x) if (length(x)) paste0(p, tolower(x)) else character(0)
+  # The only r-other- packages (non-CRAN/non-Bioc extras Rutter hand-packaged),
+  # all in ~marutter/c2d4u3.5; enumerated live 2026-07-05. They are not in the
+  # CRAN/Bioc name lists, so add them explicitly (origin=other, canonical=NA).
+  r_other <- c("amsmercury", "curvefdp", "hms-dbmi-spp", "iwrlars", "nitpick")
   unique(c(pref("r-cran-", clean(c(cran_names, archive_names))),
-           pref("r-bioc-", clean(bioc_names))))
+           pref("r-bioc-", clean(bioc_names)),
+           pref("r-other-", r_other)))
 }
 
 # Enumerate every candidate name for one archive via the per-name filtered query

@@ -15,8 +15,11 @@ test_that("candidate_binary_names unions CRAN + archive as r-cran-* and Bioc as 
 
 test_that("candidate_binary_names drops empty/NA and omits Bioc when none", {
   cand <- candidate_binary_names(c("a", "", NA_character_), character(0), character(0))
-  expect_identical(cand, "r-cran-a")
+  expect_true("r-cran-a" %in% cand)
   expect_false(any(startsWith(cand, "r-bioc-")))
+  # the fixed r-other- extras are always included
+  expect_true(all(paste0("r-other-", c("amsmercury", "curvefdp", "hms-dbmi-spp",
+                                        "iwrlars", "nitpick")) %in% cand))
 })
 
 test_that("parse_archive_index extracts directory names from the listing HTML", {
