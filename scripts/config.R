@@ -8,8 +8,8 @@ USER_AGENT   <- "r-observatory-c2d4u-downloads/1.0 (+https://github.com/r-observ
 # older archives are enabled later without any other change.
 ARCHIVES <- list(
   list(key = "c2d4u4.0+", owner = "c2d4u.team", ref = "c2d4u4.0+", r_era = "4.0", enabled = TRUE),
-  list(key = "c2d4u3.5",  owner = "marutter",   ref = "c2d4u3.5",  r_era = "3.5", enabled = FALSE),
-  list(key = "c2d4u",     owner = "marutter",   ref = "c2d4u",     r_era = "3.x", enabled = FALSE)
+  list(key = "c2d4u3.5",  owner = "marutter",   ref = "c2d4u3.5",  r_era = "3.5", enabled = TRUE),
+  list(key = "c2d4u",     owner = "marutter",   ref = "c2d4u",     r_era = "3.x", enabled = TRUE)
 )
 
 PAGE_SIZE            <- 300L   # Launchpad max ws.size
