@@ -189,7 +189,16 @@ default_io <- function() {
         rawToChar(r$content)
       }), error = function(e) NULL)
     },
+    # Concurrent multi-url fetch for the sharded backfill. Pool size is capped by
+    # config POOL but overridable per job via C2D4U_POOL so the workflow can hold
+    # max-parallel * POOL under Launchpad's ~24-connection throttle.
+    fetch_many = function(urls) {
+      pool <- suppressWarnings(as.integer(Sys.getenv("C2D4U_POOL", as.character(POOL))))
+      if (is.na(pool) || pool < 1L) pool <- POOL
+      fetch_pool(urls, pool = pool)
+    },
     cran_names = function() rownames(utils::available.packages(repos = CRAN_REPO)),
+    archive_names = function() parse_archive_index(fetch_pool(CRAN_ARCHIVE_INDEX)[[1]]),
     bioc_names = function() {
       urls <- sprintf("%s/%s/VIEWS", BIOC_VIEWS_BASE, BIOC_VIEWS_CATEGORIES)
       unique(unlist(lapply(urls, function(u) {

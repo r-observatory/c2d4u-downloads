@@ -14,6 +14,13 @@ ARCHIVES <- list(
 
 PAGE_SIZE            <- 300L   # Launchpad max ws.size
 FETCH_POOL           <- 4L     # concurrent GET pool size (polite)
+# Concurrent fetch pool for the sharded backfill (fetch_pool). Launchpad
+# throttles above ~16-24 aggregate connections, so the workflow keeps
+# max-parallel * POOL <= ~24. A single lone job (enumerate) may raise it via
+# the C2D4U_POOL env override; the local name-list run was reliable at 16.
+POOL                 <- 6L     # concurrent connections per shard
+FETCH_PASSES         <- 4L     # total attempts per url (1 + 3 retries) to ride out 503 waves
+ENUM_BATCH           <- 300L   # candidate names per enumerate wave
 # INVARIANT (load-bearing for protect-history): RECENT_WINDOW_DAYS must exceed
 # ACTIVE_WINDOW_DAYS + REVISION_WINDOW_DAYS so the recent-shard history floor
 # always covers every re-fetched (active) release's earliest returned day.
@@ -22,6 +29,7 @@ ACTIVE_WINDOW_DAYS   <- 180L   # a release is "active" (re-fetched monthly) if i
 REVISION_WINDOW_DAYS <- 90L    # trailing days re-fetched each refresh to absorb Launchpad's ~60-day lag
 
 CRAN_REPO             <- "https://cloud.r-project.org"
+CRAN_ARCHIVE_INDEX    <- "https://cran.r-project.org/src/contrib/Archive/"  # every ever-archived CRAN package
 BIOC_VIEWS_BASE       <- "https://bioconductor.org/packages/release"
 BIOC_VIEWS_CATEGORIES <- c("bioc", "data/annotation", "data/experiment", "workflows")
 LOAD_BIOC_MAP         <- TRUE  # c2d4u ships r-bioc-* packages
