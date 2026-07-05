@@ -9,6 +9,7 @@ test_that("lp_archive_ref encodes the plus and owner", {
 test_that("lp_published_url builds a filtered, paged enumeration URL", {
   u <- lp_published_url(ARCHIVES[[1]], start = 300L, size = 300L, status = "Published")
   expect_match(u, "ws.op=getPublishedBinaries")
+  expect_match(u, "ordered=false")  # required to page deep without 503s
   expect_match(u, "ws.size=300")
   expect_match(u, "ws.start=300")
   expect_match(u, "status=Published")
