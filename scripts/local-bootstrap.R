@@ -45,7 +45,7 @@ source(file.path(.script_dir, "helpers.R"))
 # Constants for this bootstrap.
 STATE_DIR   <- "bootstrap-state"
 OUT_DIR     <- "out"
-POOL        <- 8L      # concurrent connections
+POOL        <- 16L     # concurrent connections
 ENUM_BATCH  <- 300L    # names per enumerate wave
 ENUM_CKPT   <- 2000L   # checkpoint the queried set + entries every N names
 CNT_BATCH   <- 400L    # pub_ids per counts wave
