@@ -6,7 +6,13 @@ lp_archive_ref <- function(archive) {
 }
 
 lp_published_url <- function(archive, start = 0L, size = PAGE_SIZE, status = NULL) {
-  u <- sprintf("%s?ws.op=getPublishedBinaries&ws.size=%d&ws.start=%d",
+  # ordered=false is REQUIRED: the default ordered=true forces an expensive
+  # server-side sort that intermittently returns HTTP 503 on deep offsets
+  # (past ~12,900 entries), which makes the ~326k-entry whole-archive sweep
+  # impossible. ordered=false pages reliably at any depth and ~3x faster; order
+  # is irrelevant since we page the complete set and dedupe. Launchpad echoes
+  # the param into next_collection_link, so every paged request keeps it.
+  u <- sprintf("%s?ws.op=getPublishedBinaries&ordered=false&ws.size=%d&ws.start=%d",
                lp_archive_ref(archive), as.integer(size), as.integer(start))
   if (!is.null(status)) u <- paste0(u, "&status=", status)
   u
