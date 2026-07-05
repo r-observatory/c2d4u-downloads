@@ -7,11 +7,13 @@
 if (!exists("SHARD_PREFIX")) source(file.path("scripts", "config.R"))
 if (!exists("build_roster")) source(file.path("scripts", "helpers.R"))
 
-with_retry <- function(expr, tries = 3L, wait = 3) {
+with_retry <- function(expr, tries = 7L, wait = 5) {
+  # Exponential backoff (capped) so a transient Launchpad 503 during a long
+  # multi-page sweep is ridden out rather than aborting the whole enumeration.
   for (i in seq_len(tries)) {
     val <- tryCatch(force(expr), error = function(e) e)
     if (!inherits(val, "error")) return(val)
-    if (i < tries) Sys.sleep(wait * i)
+    if (i < tries) Sys.sleep(min(wait * 2^(i - 1), 60))
   }
   stop(val)
 }
