@@ -7,6 +7,7 @@ out/
 parts/
 bootstrap-state/
 *.db
+*.log
 
 # R
 .Rhistory
