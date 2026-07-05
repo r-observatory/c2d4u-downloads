@@ -66,11 +66,12 @@ run_update <- function(io, out_dir, force_full = FALSE) {
                           bioc = if (isTRUE(LOAD_BIOC_MAP)) build_bioc_map(io$bioc_names()) else NULL),
                      error = function(e) NULL)
     enabled <- Filter(function(a) isTRUE(a$enabled), ARCHIVES)
-    ent <- tryCatch({
-      acc <- list()
-      for (a in enabled) acc[[a$key]] <- enumerate_archive(io$fetch, a)
-      do.call(rbind, acc)
-    }, error = function(e) NULL)
+    # Enumerate each archive independently so one unreachable archive does not
+    # abort the roster for the others.
+    acc <- lapply(enabled, function(a)
+      tryCatch(enumerate_archive(io$fetch, a), error = function(e) NULL))
+    acc <- Filter(Negate(is.null), acc)
+    ent <- if (length(acc)) do.call(rbind, acc) else NULL
     if (!is.null(maps) && !is.null(ent) && nrow(ent) > 0L) {
       add <- build_roster(ent, maps$cran, maps$bioc)
       ko <- paste(roster$archive, roster$binary_name, roster$version)
