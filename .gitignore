@@ -5,6 +5,7 @@ docs/superpowers/
 # Pipeline run outputs and generated shards
 out/
 parts/
+bootstrap-state/
 *.db
 
 # R
