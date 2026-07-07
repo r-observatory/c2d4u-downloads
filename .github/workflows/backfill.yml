@@ -15,7 +15,7 @@ jobs:
     # a larger pool is safe; the local run was reliable at 16.
     timeout-minutes: 350
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: r-lib/actions/setup-r@v2
         with: { r-version: "release", use-public-rspm: true }
       - uses: r-lib/actions/setup-r-dependencies@v2
@@ -36,7 +36,7 @@ jobs:
         env:
           C2D4U_OUT: out
           C2D4U_POOL: "16"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: roster
           path: out/c2d4u-roster.db
@@ -53,7 +53,7 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: r-lib/actions/setup-r@v2
         with: { r-version: "release", use-public-rspm: true }
       - uses: r-lib/actions/setup-r-dependencies@v2
@@ -65,7 +65,7 @@ jobs:
             any::curl
             any::testthat
             any::withr
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { name: roster, path: roster }
       - name: Fetch shard ${{ matrix.shard }} of 12
         run: |
@@ -77,7 +77,7 @@ jobs:
           C2D4U_SHARD_I: ${{ matrix.shard }}
           C2D4U_SHARD_N: "12"
           C2D4U_POOL: "6"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: shard-${{ matrix.shard }}
           path: out/c2d4u-downloads-shard-*.db
@@ -88,7 +88,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: r-lib/actions/setup-r@v2
         with: { r-version: "release", use-public-rspm: true }
       - uses: r-lib/actions/setup-r-dependencies@v2
@@ -100,7 +100,7 @@ jobs:
             any::curl
             any::testthat
             any::withr
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { path: parts, pattern: shard-*, merge-multiple: true }
       - name: Merge shards
         run: |
