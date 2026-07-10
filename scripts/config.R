@@ -34,6 +34,14 @@ BIOC_VIEWS_BASE       <- "https://bioconductor.org/packages/release"
 BIOC_VIEWS_CATEGORIES <- c("bioc", "data/annotation", "data/experiment", "workflows")
 LOAD_BIOC_MAP         <- TRUE  # c2d4u ships r-bioc-* packages
 
+# Org identity ledger assets (canonical_name + identity_state source).
+CRAN_ARCHIVE_REPO <- "r-observatory/cran-archive"
+CRAN_ARCHIVE_DB   <- "cran-archive.db"
+BIOC_META_REPO    <- "r-observatory/bioconductor-metadata"
+BIOC_META_DB      <- "bioconductor-metadata.db"
+CRAN_NAMES_FLOOR  <- 15000L   # below this the identity fetch is treated as partial
+BIOC_NAMES_FLOOR  <- 1500L
+
 SHARD_PREFIX   <- "c2d4u-downloads"
 DAILY_TABLE    <- "c2d4u_downloads_daily"
 SUMMARY_TABLE  <- "c2d4u_downloads_summary"
@@ -44,7 +52,8 @@ SUMMARY_COLS <- c(
   "package", "package_lower", "origin", "canonical_name",
   "total_30d", "total_90d", "total_365d",
   "rank_30d", "rank_90d", "rank_365d",
-  "avg_daily_30d", "trend", "first_date", "last_date", "cnt_total"
+  "avg_daily_30d", "trend", "first_date", "last_date", "cnt_total",
+  "identity_state"
 )
 
 # Env var used by the CLI entrypoints to force a full re-fetch/rebuild.
