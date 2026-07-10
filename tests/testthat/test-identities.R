@@ -1,47 +1,54 @@
-test_that(".build_name_map keys by lowercase, first canonical wins", {
-  m <- .build_name_map(c("MASS", "Matrix", "ggplot2"))
-  expect_identical(unname(m[["mass"]]), "MASS")
-  expect_identical(unname(m[["matrix"]]), "Matrix")
-})
-
 test_that("parse_views_packages extracts Package fields", {
   txt <- "Package: limma\nVersion: 1.0\n\nPackage: DESeq2\nVersion: 2.0\n"
   expect_identical(parse_views_packages(txt), c("limma", "DESeq2"))
 })
 
-test_that("resolve_identities routes prefixes and restores case", {
-  cran <- build_cran_map(c("ggplot2", "MASS", "data.table"))
-  bioc <- build_bioc_map(c("Biobase", "S4Vectors"))
+test_that("resolve_identities routes prefixes, restores case, carries identity_state", {
+  maps <- mk_maps(
+    name  = c(ggplot2 = "ggplot2", mass = "MASS", data.table = "data.table",
+              biobase = "Biobase"),
+    state = c(ggplot2 = "live", mass = "archived", data.table = "live",
+              biobase = "live"))
   out <- resolve_identities(
     c("r-cran-ggplot2", "r-cran-mass", "r-cran-data.table",
-      "r-bioc-biobase", "r-other-amsmercury", "gsl-bin", "littler"),
-    cran, bioc)
-  # toolchain debs dropped
-  expect_identical(nrow(out), 5L)
-  expect_identical(out$origin,
-    c("cran", "cran", "cran", "bioc", "other"))
-  expect_identical(out$package,
-    c("ggplot2", "mass", "data.table", "biobase", "amsmercury"))
-  expect_identical(out$canonical_name,
-    c("ggplot2", "MASS", "data.table", "Biobase", NA_character_))
+      "r-bioc-biobase", "r-other-amsmercury", "gsl-bin", "littler"), maps)
+  expect_identical(nrow(out), 5L)                      # toolchain debs dropped
+  expect_identical(out$origin, c("cran", "cran", "cran", "bioc", "other"))
+  expect_identical(out$package, c("ggplot2", "mass", "data.table", "biobase", "amsmercury"))
+  expect_identical(out$canonical_name, c("ggplot2", "MASS", "data.table", "Biobase", NA_character_))
+  expect_identical(out$identity_state, c("live", "archived", "live", "live", NA_character_))
 })
 
-test_that("resolve_identities keeps origin and falls back to token when unmapped", {
-  out <- resolve_identities("r-cran-archivedpkg", build_cran_map(character(0)), NULL)
+test_that("resolve_identities falls back to token and NA state when absent from the ledger", {
+  out <- resolve_identities("r-cran-archivedpkg", mk_maps())
   expect_identical(out$origin, "cran")
-  expect_identical(out$canonical_name, "archivedpkg")
+  expect_identical(out$canonical_name, "archivedpkg")   # token fallback preserved
+  expect_identical(out$identity_state, NA_character_)   # honest unknown
+})
+
+test_that("resolve_identities keeps origin='other' off the leaderboard (canonical + state NA)", {
+  out <- resolve_identities("r-other-nitpick",
+                            mk_maps(c(nitpick = "Nitpick"), c(nitpick = "live")))
+  expect_identical(out$origin, "other")
+  expect_identical(out$canonical_name, NA_character_)
+  expect_identical(out$identity_state, NA_character_)
 })
 
 test_that("resolve_identities dedupes a token to one origin (cran wins)", {
   out <- resolve_identities(c("r-cran-foo", "r-bioc-foo"),
-                            build_cran_map("foo"), build_bioc_map("foo"))
+                            mk_maps(c(foo = "Foo"), c(foo = "live")))
   expect_identical(nrow(out), 1L)
   expect_identical(out$origin, "cran")
 })
 
-test_that("resolve_identities does not recycle canonical when bioc_map is NULL", {
-  out <- resolve_identities(c("r-bioc-foo", "r-bioc-bar"),
-                            build_cran_map(character(0)), NULL)
-  expect_identical(out$canonical_name, c("foo", "bar"))
-  expect_identical(out$origin, c("bioc", "bioc"))
+test_that("build_roster carries origin, canonical_name, and identity_state", {
+  ent <- data.frame(
+    archive = "c2d4u4.0+", binary_name = "r-cran-mass", version = "7.3", pub_id = 5L,
+    arch = "amd64", status = "Published", date_published = "2023-01-01T00:00:00+00:00",
+    stringsAsFactors = FALSE)
+  r <- build_roster(ent, mk_maps(c(mass = "MASS"), c(mass = "archived")))
+  expect_identical(r$package, "mass")
+  expect_identical(r$canonical_name, "MASS")
+  expect_identical(r$identity_state, "archived")
+  expect_true("identity_state" %in% names(r))
 })

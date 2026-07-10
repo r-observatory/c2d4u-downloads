@@ -117,22 +117,21 @@ parse_counts_page <- function(txt) {
   list(rows = rows, next_link = if (is.null(nl)) NA_character_ else as.character(nl))
 }
 
-.build_name_map <- function(names) {
-  names <- names[!is.na(names) & nzchar(names)]
-  names <- names[!duplicated(tolower(names))]
-  stats::setNames(names, tolower(names))
-}
-build_cran_map <- function(cran_names) .build_name_map(cran_names)
-build_bioc_map <- function(bioc_names) .build_name_map(bioc_names)
-
 parse_views_packages <- function(views_text) {
   lines <- unlist(strsplit(views_text, "\n", fixed = TRUE))
   hits <- grep("^Package:\\s*", lines, value = TRUE)
   trimws(sub("^Package:\\s*", "", hits))
 }
 
-# Prefix-authoritative origin for c2d4u. Non-r-* names are dropped.
-resolve_identities <- function(binary_names, cran_map, bioc_map = NULL) {
+# Prefix-authoritative origin for c2d4u. Non-r-* names are dropped. canonical_name
+# and identity_state come from the org identity ledger (`maps$name_map` /
+# `maps$state_map`, keyed by the lowercased token). A cran/bioc token absent from
+# the ledger keeps canonical = token and identity_state = NA (honest unknown);
+# origin='other' keeps canonical = NA and identity_state = NA (off the leaderboard).
+resolve_identities <- function(binary_names, maps) {
+  name_map  <- maps$name_map  %||% stats::setNames(character(0), character(0))
+  state_map <- maps$state_map %||% stats::setNames(character(0), character(0))
+
   bn <- unique(binary_names)
   pref <- rep(NA_character_, length(bn))
   pref[startsWith(bn, "r-cran-")]  <- "cran"
@@ -143,25 +142,20 @@ resolve_identities <- function(binary_names, cran_map, bioc_map = NULL) {
   token <- tolower(sub("^r-(cran|bioc|other)-", "", bn))
 
   canonical <- rep(NA_character_, length(bn))
-  is_cran <- pref == "cran"
-  is_bioc <- pref == "bioc"
-  if (any(is_cran)) {
-    mapped <- unname(cran_map[token[is_cran]])
-    canonical[is_cran] <- ifelse(is.na(mapped), token[is_cran], mapped)
+  state     <- rep(NA_character_, length(bn))
+  scoped <- pref %in% c("cran", "bioc")   # cran/bioc look up the ledger; other stays NA
+  if (any(scoped)) {
+    mapped <- unname(name_map[token[scoped]])
+    canonical[scoped] <- ifelse(is.na(mapped), token[scoped], mapped)
+    state[scoped]     <- unname(state_map[token[scoped]])
   }
-  if (any(is_bioc)) {
-    mapped <- if (!is.null(bioc_map)) unname(bioc_map[token[is_bioc]]) else rep(NA_character_, sum(is_bioc))
-    canonical[is_bioc] <- ifelse(is.na(mapped), token[is_bioc], mapped)
-  }
-  # origin='other' keeps canonical_name = NA (off the leaderboard).
 
   df <- data.frame(binary_name = bn, package = token, origin = pref,
-                   canonical_name = canonical, stringsAsFactors = FALSE)
-  # Keep one row per package token, preferring cran > bioc > other. This must
-  # preserve first-appearance order (a plain order()+!duplicated() would sort
-  # alphabetically and break callers that rely on input order).
-  # One origin per token: cran > bioc > other.
-  # Keep the highest-rank (lowest value) occurrence of each token in order of first appearance.
+                   canonical_name = canonical, identity_state = state,
+                   stringsAsFactors = FALSE)
+  # Keep one row per package token, preferring cran > bioc > other, preserving
+  # first-appearance order (a plain order()+!duplicated() would sort alphabetically
+  # and break callers that rely on input order).
   rankv <- match(df$origin, c("cran", "bioc", "other"))
   unique_tokens <- unique(df$package)
   keep_rows <- integer(0)
@@ -243,6 +237,7 @@ releases_table_ddl <- function(table) sprintf(
      package        TEXT,
      origin         TEXT,
      canonical_name TEXT,
+     identity_state TEXT,
      cnt_total      INTEGER,
      last_day       TEXT,
      done           INTEGER,
@@ -427,15 +422,17 @@ embed_aux <- function(recent_path, summary_df, releases_df) {
   if (nrow(releases_df) > 0)
     DBI::dbWriteTable(con, RELEASES_TABLE,
       releases_df[c("archive","binary_name","version","pub_id","package",
-                    "origin","canonical_name","cnt_total","last_day","done")], append = TRUE)
+                    "origin","canonical_name","identity_state","cnt_total","last_day","done")],
+      append = TRUE)
   invisible(NULL)
 }
 
 .empty_releases <- function() {
   data.frame(archive = character(0), binary_name = character(0), version = character(0),
              pub_id = integer(0), package = character(0), origin = character(0),
-             canonical_name = character(0), cnt_total = integer(0),
-             last_day = character(0), done = integer(0), stringsAsFactors = FALSE)
+             canonical_name = character(0), identity_state = character(0),
+             cnt_total = integer(0), last_day = character(0), done = integer(0),
+             stringsAsFactors = FALSE)
 }
 
 load_releases <- function(path) {
@@ -443,7 +440,9 @@ load_releases <- function(path) {
   con <- DBI::dbConnect(RSQLite::SQLite(), path)
   on.exit(DBI::dbDisconnect(con), add = TRUE)
   if (!RELEASES_TABLE %in% DBI::dbListTables(con)) return(.empty_releases())
-  DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", RELEASES_TABLE))
+  df <- DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", RELEASES_TABLE))
+  if (!"identity_state" %in% names(df)) df$identity_state <- NA_character_
+  df
 }
 
 paginate <- function(fetch, first_url, parse_fn, field) {
@@ -623,10 +622,10 @@ dedup_releases <- function(entries) {
   e
 }
 
-build_roster <- function(entries, cran_map, bioc_map = NULL) {
+build_roster <- function(entries, maps) {
   d <- dedup_releases(entries)
   if (nrow(d) == 0L) return(.empty_releases())
-  ident <- resolve_identities(d$binary_name, cran_map, bioc_map)  # drops toolchain, one origin per token
+  ident <- resolve_identities(d$binary_name, maps)  # drops toolchain, one origin per token
   # Note: resolve_identities keeps one binary per package token (cran > bioc >
   # other). If the same token exists under two prefixes (rare; CRAN/Bioc names
   # are mostly disjoint), the losing binary is dropped and its counts are not
@@ -638,6 +637,7 @@ build_roster <- function(entries, cran_map, bioc_map = NULL) {
     archive = d$archive, binary_name = d$binary_name, version = d$version,
     pub_id = as.integer(d$pub_id), package = ident$package[ib],
     origin = ident$origin[ib], canonical_name = ident$canonical_name[ib],
+    identity_state = ident$identity_state[ib],
     cnt_total = NA_integer_, last_day = NA_character_, done = 0L,
     stringsAsFactors = FALSE)
 }
