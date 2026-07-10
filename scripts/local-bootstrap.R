@@ -174,9 +174,20 @@ archive_names_fn <- function() {
   nm[!nm %in% c("..", ".") & nzchar(nm)]
 }
 
-build_maps <- function(cran, bioc) {
-  list(cran = build_cran_map(cran),
-       bioc = if (isTRUE(LOAD_BIOC_MAP)) build_bioc_map(bioc) else NULL)
+# Download the shared identity assets from each source repo's `current` release
+# into a temp dir, for robservatory::load_identity.
+identity_dbs_fn <- function() {
+  tmp <- tempfile(); dir.create(tmp, showWarnings = FALSE)
+  dl <- function(repo, db) {
+    st <- suppressWarnings(system2("gh",
+      c("release", "download", "current", "--repo", repo,
+        "--pattern", db, "--dir", tmp, "--clobber"), stdout = FALSE, stderr = FALSE))
+    p <- file.path(tmp, db)
+    if (!identical(as.integer(st), 0L) || !file.exists(p)) stop("identity asset unreachable: ", repo, "/", db)
+    p
+  }
+  list(cran = dl(CRAN_ARCHIVE_REPO, CRAN_ARCHIVE_DB),
+       bioc = dl(BIOC_META_REPO, BIOC_META_DB))
 }
 
 candidate_names <- function(mode, cran, bioc) {
@@ -240,7 +251,7 @@ enumerate <- function(candidates, maps) {
     lg("enumerate: %d names still unqueried after this pass; re-run to retry them", length(still))
     return(NULL)  # not complete
   }
-  roster <- build_roster(entries, maps$cran, maps$bioc)
+  roster <- build_roster(entries, maps)
   saveRDS(roster, sp("roster.rds"))
   lg("enumerate: COMPLETE. entries=%d -> roster releases=%d (distinct packages=%d)",
      nrow(entries), nrow(roster), length(unique(roster$package)))
@@ -382,12 +393,19 @@ main <- function(mode, limit = NA_integer_) {
 
   lg("mode=%s  force_build=%s  publish=%s", mode, force_build, do_publish)
 
-  # Name maps are needed for canonical-case resolution in both modes.
-  lg("building CRAN/Bioc name maps ...")
+  # Name universe (candidate binary names) still comes from the live indexes.
+  lg("building candidate name universe ...")
   cran <- cran_names_fn()
-  bioc <- if (isTRUE(LOAD_BIOC_MAP)) bioc_names_fn() else character(0)
-  maps <- build_maps(cran, bioc)
-  lg("maps: CRAN=%d names, Bioc=%d names", length(cran), length(bioc))
+  bioc <- bioc_names_fn()
+
+  # Resolution (canonical_name + identity_state) comes from the org identity ledger.
+  lg("loading org identity ledger ...")
+  dbs  <- identity_dbs_fn()
+  maps <- build_identity_maps(dbs$cran, dbs$bioc)
+  if (!robservatory::check_size(maps$n_cran, floor = CRAN_NAMES_FLOOR) ||
+      !robservatory::check_size(maps$n_bioc, floor = BIOC_NAMES_FLOOR))
+    stop(sprintf("identity size gate failed (cran=%d, bioc=%d)", maps$n_cran, maps$n_bioc))
+  lg("ledger: cran=%d bioc=%d canonical names", maps$n_cran, maps$n_bioc)
 
   candidates <- candidate_names(mode, cran, bioc)
   if (!is.na(limit) && limit > 0L && length(candidates) > limit) {

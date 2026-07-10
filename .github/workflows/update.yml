@@ -10,6 +10,10 @@ on:
         description: "Re-enumerate and re-fetch every release, rebuild all shards."
         type: boolean
         default: false
+      reclassify_only:
+        description: "Rebuild identity + summary from the already-downloaded shard history, with no Launchpad calls."
+        type: boolean
+        default: false
 permissions:
   contents: write
 concurrency:
@@ -34,12 +38,14 @@ jobs:
             any::curl
             any::testthat
             any::withr
+            github::r-observatory/robservatory@v0.1.0
       - name: Run unit tests
         run: Rscript tests/testthat.R
       - name: Run update script
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           C2D4U_FORCE_REBUILD: ${{ inputs.force_full_rebuild }}
+          C2D4U_RECLASSIFY_ONLY: ${{ inputs.reclassify_only }}
         run: |
           mkdir -p out
           Rscript scripts/update.R out/

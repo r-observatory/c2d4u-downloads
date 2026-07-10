@@ -23,26 +23,25 @@ write_roster <- function(path, roster_df) {
   DBI::dbExecute(con, "PRAGMA journal_mode=DELETE")
   DBI::dbExecute(con, releases_table_ddl(RELEASES_TABLE))
   cols <- c("archive","binary_name","version","pub_id","package",
-            "origin","canonical_name","cnt_total","last_day","done")
+            "origin","canonical_name","identity_state","cnt_total","last_day","done")
   if (nrow(roster_df) > 0) DBI::dbWriteTable(con, RELEASES_TABLE, roster_df[cols], append = TRUE)
   DBI::dbExecute(con, "VACUUM")
   invisible(path)
 }
 
-run_enumerate <- function(io, out_dir) {
+run_enumerate <- function(io, out_dir, live_floor = CRAN_NAMES_FLOOR, bioc_floor = BIOC_NAMES_FLOOR) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
-  cran <- io$cran_names()
-  bioc <- if (isTRUE(LOAD_BIOC_MAP)) io$bioc_names() else character(0)
+  cran    <- io$cran_names()
+  bioc    <- io$bioc_names()
   archive <- io$archive_names()
-  maps <- list(cran = build_cran_map(cran),
-               bioc = if (isTRUE(LOAD_BIOC_MAP)) build_bioc_map(bioc) else NULL)
-  cand <- candidate_binary_names(cran, archive, bioc)
+  maps    <- load_gated_maps(io, live_floor, bioc_floor)  # ledger; stops on unreachable/gate-fail
+  cand <- candidate_binary_names(cran, archive, bioc)      # candidate universe unchanged
   message(sprintf("enumerate: name universe CRAN=%d CRAN-archive=%d Bioc=%d -> %d candidate names",
                   length(cran), length(archive), length(bioc), length(cand)))
   enabled <- Filter(function(a) isTRUE(a$enabled), ARCHIVES)
   ent <- do.call(rbind, lapply(enabled, function(a) enumerate_names(io$fetch_many, cand, a)))
   roster <- if (is.null(ent) || nrow(ent) == 0L) .empty_releases()
-            else build_roster(ent, maps$cran, maps$bioc)
+            else build_roster(ent, maps)
   message(sprintf("enumerate: %d releases across %d packages",
                   nrow(roster), length(unique(roster$package))))
   write_roster(file.path(out_dir, ROSTER_FILE), roster)
@@ -87,7 +86,7 @@ run_fetch_shard <- function(io, out_dir, roster_path, i, N) {
   con <- DBI::dbConnect(RSQLite::SQLite(), sp); on.exit(DBI::dbDisconnect(con), add = TRUE)
   DBI::dbExecute(con, releases_table_ddl(RELEASES_TABLE))
   cols <- c("archive","binary_name","version","pub_id","package",
-            "origin","canonical_name","cnt_total","last_day","done")
+            "origin","canonical_name","identity_state","cnt_total","last_day","done")
   if (nrow(mine) > 0) DBI::dbWriteTable(con, RELEASES_TABLE, mine[cols], append = TRUE)
   message(sprintf("fetch shard %d/%d: %d daily rows, %d releases fetched",
                   i, N, nrow(daily), sum(mine$done)))
