@@ -25,7 +25,7 @@ test_that("build_roster resolves identities and drops toolchain", {
     pub_id = c(1L, 2L), binary_name = c("r-cran-ggplot2","gsl-bin"),
     version = c("3.4.4","2.5"), arch = "amd64",
     status = "Published", date_published = "2023-01-01", stringsAsFactors = FALSE)
-  r <- build_roster(ent, build_cran_map("ggplot2"), NULL)
+  r <- build_roster(ent, mk_maps(c(ggplot2 = "ggplot2")))
   expect_identical(nrow(r), 1L)
   expect_identical(r$package, "ggplot2")
   expect_identical(r$done, 0L)

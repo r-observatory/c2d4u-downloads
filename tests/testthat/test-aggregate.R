@@ -4,7 +4,7 @@ test_that("aggregate_counts sums to package/date via identity", {
     version = c("v2204","v2004","v2204","x"),
     day = c("2026-05-01","2026-05-01","2026-05-02","2026-05-01"),
     count = c(3L, 4L, 5L, 9L), stringsAsFactors = FALSE)
-  ident <- resolve_identities(counts$binary_name, build_cran_map("ggplot2"), NULL)
+  ident <- resolve_identities(counts$binary_name, mk_maps(c(ggplot2 = "ggplot2")))
   agg <- aggregate_counts(counts, ident)
   expect_identical(agg$package, c("ggplot2", "ggplot2"))
   expect_identical(agg$date, c("2026-05-01", "2026-05-02"))
@@ -15,7 +15,7 @@ test_that("aggregate_counts warns and drops NA day/count rows instead of silentl
   counts <- data.frame(binary_name = c("r-cran-a", "r-cran-a"),
                        version = "v", day = c("2026-05-01", NA),
                        count = c(3L, 7L), stringsAsFactors = FALSE)
-  ident <- resolve_identities("r-cran-a", build_cran_map("a"), NULL)
+  ident <- resolve_identities("r-cran-a", mk_maps(c(a = "a")))
   expect_warning(agg <- aggregate_counts(counts, ident), "NA day/count")
   expect_identical(agg$date, "2026-05-01")
   expect_identical(agg$count, 3L)

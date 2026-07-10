@@ -226,6 +226,7 @@ summary_table_ddl <- function(table) sprintf(
      first_date    TEXT,
      last_date     TEXT,
      cnt_total     INTEGER,
+     identity_state TEXT,
      PRIMARY KEY (package))", table)
 
 releases_table_ddl <- function(table) sprintf(
@@ -291,7 +292,8 @@ empty_summary <- function() {
              rank_30d = integer(0), rank_90d = integer(0), rank_365d = integer(0),
              avg_daily_30d = numeric(0), trend = numeric(0),
              first_date = character(0), last_date = character(0),
-             cnt_total = integer(0), stringsAsFactors = FALSE)
+             cnt_total = integer(0), identity_state = character(0),
+             stringsAsFactors = FALSE)
 }
 
 build_summary <- function(daily_con, identity_df, anchor_date, prior_summary = NULL) {
@@ -314,7 +316,8 @@ build_summary <- function(daily_con, identity_df, anchor_date, prior_summary = N
                       round((agg$total_30d / agg$prev_30d - 1) * 100, 2), NA_real_)
   # The roster has one row per (binary,version); collapse to one identity per
   # package token before joining so the aggregate is not fanned out.
-  id1 <- identity_df[!duplicated(identity_df$package), c("package","origin","canonical_name")]
+  id1 <- identity_df[!duplicated(identity_df$package),
+                     c("package","origin","canonical_name","identity_state")]
   agg <- merge(agg, id1, by = "package", all.x = TRUE)
   agg$origin <- ifelse(is.na(agg$origin), "other", agg$origin)
 
@@ -323,7 +326,7 @@ build_summary <- function(daily_con, identity_df, anchor_date, prior_summary = N
 
   cur <- agg[c("package","package_lower","origin","canonical_name",
                "total_30d","total_90d","total_365d","avg_daily_30d","trend",
-               "first_date","last_date","cnt_total")]
+               "first_date","last_date","cnt_total","identity_state")]
 
   # Merge-forward: prior packages absent this run keep identity + first_date +
   # last_date + cnt_total, with zeroed current windows.
@@ -336,7 +339,8 @@ build_summary <- function(daily_con, identity_df, anchor_date, prior_summary = N
         total_30d = 0L, total_90d = 0L, total_365d = 0L,
         avg_daily_30d = 0, trend = NA_real_,
         first_date = gone$first_date, last_date = gone$last_date,
-        cnt_total = as.integer(gone$cnt_total), stringsAsFactors = FALSE)
+        cnt_total = as.integer(gone$cnt_total),
+        identity_state = gone$identity_state, stringsAsFactors = FALSE)
       cur <- rbind(cur, carry)
     }
     # Preserve the earliest first_date ever seen for surviving packages.
@@ -662,5 +666,11 @@ load_summary <- function(path) {
   con <- DBI::dbConnect(RSQLite::SQLite(), path)
   on.exit(DBI::dbDisconnect(con), add = TRUE)
   if (!SUMMARY_TABLE %in% DBI::dbListTables(con)) return(empty_summary())
-  DBI::dbGetQuery(con, sprintf("SELECT %s FROM %s", paste(SUMMARY_COLS, collapse = ","), SUMMARY_TABLE))
+  # An older shard published before identity_state existed lacks the column
+  # in its schema entirely, so SELECT * over it simply omits it (0 rows or
+  # many). Backfill length-safe: rep(NA, nrow(df)) rather than a scalar NA,
+  # which errors ("replacement has 1 row, data has 0") on a 0-row frame.
+  df <- DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", SUMMARY_TABLE))
+  for (col in SUMMARY_COLS) if (!col %in% names(df)) df[[col]] <- rep(NA_character_, nrow(df))
+  df[SUMMARY_COLS]
 }
