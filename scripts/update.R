@@ -19,7 +19,8 @@ with_retry <- function(expr, tries = 9L, wait = 5) {
   stop(val)
 }
 
-run_update <- function(io, out_dir, force_full = FALSE) {
+run_update <- function(io, out_dir, force_full = FALSE,
+                       live_floor = CRAN_NAMES_FLOOR, bioc_floor = BIOC_NAMES_FLOOR) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   recent_path   <- file.path(out_dir, sprintf("%s-recent.db", SHARD_PREFIX))
   summary_path  <- file.path(out_dir, sprintf("%s-summary.db", SHARD_PREFIX))
@@ -44,6 +45,17 @@ run_update <- function(io, out_dir, force_full = FALSE) {
   roster        <- load_releases(recent_path)
   prior_summary <- load_summary(recent_path)
 
+  # Load the org identity ledger once for this run (size-gated). On any failure
+  # DEGRADE honestly: keep the token as canonical_name and NA identity_state, never
+  # abort and never drop a row. The frozen archive self-heals on the next run.
+  ledger <- tryCatch(load_gated_maps(io, live_floor, bioc_floor),
+                     error = function(e) {
+                       message("identity ledger unavailable (", conditionMessage(e),
+                               "); degrading to token canonical_name and NA identity_state")
+                       NULL
+                     })
+  resolver <- ledger %||% empty_identity_maps()
+
   year_files <- list.files(out_dir, full.names = TRUE,
     pattern = sprintf("^%s-20[0-9]{2}\\.db$", SHARD_PREFIX))
   # Always union the recent shard as a history floor: a partial year-shard
@@ -62,9 +74,6 @@ run_update <- function(io, out_dir, force_full = FALSE) {
 
   # ENUMERATE only when cold or forced (the archive is frozen; the roster is static).
   if (nrow(roster) == 0L || isTRUE(force_full)) {
-    maps <- tryCatch(list(cran = build_cran_map(io$cran_names()),
-                          bioc = if (isTRUE(LOAD_BIOC_MAP)) build_bioc_map(io$bioc_names()) else NULL),
-                     error = function(e) NULL)
     enabled <- Filter(function(a) isTRUE(a$enabled), ARCHIVES)
     # Enumerate each archive independently so one unreachable archive does not
     # abort the roster for the others.
@@ -72,8 +81,8 @@ run_update <- function(io, out_dir, force_full = FALSE) {
       tryCatch(enumerate_archive(io$fetch, a), error = function(e) NULL))
     acc <- Filter(Negate(is.null), acc)
     ent <- if (length(acc)) do.call(rbind, acc) else NULL
-    if (!is.null(maps) && !is.null(ent) && nrow(ent) > 0L) {
-      add <- build_roster(ent, maps$cran, maps$bioc)
+    if (!is.null(ent) && nrow(ent) > 0L) {
+      add <- build_roster(ent, resolver)
       ko <- paste(roster$archive, roster$binary_name, roster$version)
       kn <- paste(add$archive, add$binary_name, add$version)
       roster <- rbind(roster, add[!kn %in% ko, , drop = FALSE])
@@ -130,6 +139,19 @@ run_update <- function(io, out_dir, force_full = FALSE) {
   on.exit(DBI::dbDisconnect(con), add = TRUE)
   DBI::dbExecute(con, daily_table_ddl(DAILY_TABLE))
   DBI::dbWriteTable(con, DAILY_TABLE, daily_all[c("package","date","count")], append = TRUE)
+
+  # ENRICH the whole roster from the ledger: canonical_name / identity_state are
+  # refreshed by routing every persisted binary_name through the one resolver.
+  # Idempotent for origin (prefix-authoritative). Skipped on degrade so persisted
+  # identity is never regressed; identity_state stays NA where the ledger is silent.
+  if (!is.null(ledger) && nrow(roster) > 0L) {
+    ident <- resolve_identities(roster$binary_name, ledger)
+    ib <- match(roster$binary_name, ident$binary_name)
+    ok <- !is.na(ib)
+    roster$origin[ok]         <- ident$origin[ib[ok]]
+    roster$canonical_name[ok] <- ident$canonical_name[ib[ok]]
+    roster$identity_state[ok] <- ident$identity_state[ib[ok]]
+  }
 
   anchor <- max(daily_all$date)
   summary_df <- build_summary(con, roster, anchor, prior_summary = prior_summary)
@@ -206,6 +228,22 @@ default_io <- function() {
         txt <- tryCatch(rawToChar(curl::curl_fetch_memory(u)$content), error = function(e) "")
         parse_views_packages(txt)
       }), use.names = FALSE))
+    },
+    # Downloads the shared identity assets (cran-archive's cran_names_all and
+    # bioconductor-metadata's bioc_names_all) from each source repo's `current`
+    # release into a temp dir, for robservatory::load_identity.
+    identity_dbs = function() {
+      tmp <- tempfile(); dir.create(tmp, showWarnings = FALSE)
+      dl <- function(repo, db) {
+        st <- suppressWarnings(system2("gh",
+          c("release", "download", "current", "--repo", repo,
+            "--pattern", db, "--dir", tmp, "--clobber"), stdout = FALSE, stderr = FALSE))
+        p <- file.path(tmp, db)
+        if (!identical(as.integer(st), 0L) || !file.exists(p)) stop("identity asset unreachable: ", repo, "/", db)
+        p
+      }
+      list(cran = dl(CRAN_ARCHIVE_REPO, CRAN_ARCHIVE_DB),
+           bioc = dl(BIOC_META_REPO, BIOC_META_DB))
     },
     now = function() Sys.time())
 }
