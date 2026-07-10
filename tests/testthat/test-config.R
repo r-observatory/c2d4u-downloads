@@ -17,4 +17,5 @@ test_that("config exposes the identity ledger assets and the trailing identity_s
   expect_equal(BIOC_META_REPO, "r-observatory/bioconductor-metadata")
   expect_equal(CRAN_NAMES_FLOOR, 15000L)
   expect_equal(BIOC_NAMES_FLOOR, 1500L)
+  expect_false(exists("LOAD_BIOC_MAP"))  # live-source config removed
 })

@@ -32,7 +32,6 @@ CRAN_REPO             <- "https://cloud.r-project.org"
 CRAN_ARCHIVE_INDEX    <- "https://cran.r-project.org/src/contrib/Archive/"  # every ever-archived CRAN package
 BIOC_VIEWS_BASE       <- "https://bioconductor.org/packages/release"
 BIOC_VIEWS_CATEGORIES <- c("bioc", "data/annotation", "data/experiment", "workflows")
-LOAD_BIOC_MAP         <- TRUE  # c2d4u ships r-bioc-* packages
 
 # Org identity ledger assets (canonical_name + identity_state source).
 CRAN_ARCHIVE_REPO <- "r-observatory/cran-archive"
