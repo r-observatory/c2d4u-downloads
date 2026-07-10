@@ -19,7 +19,7 @@ with_retry <- function(expr, tries = 9L, wait = 5) {
   stop(val)
 }
 
-run_update <- function(io, out_dir, force_full = FALSE,
+run_update <- function(io, out_dir, force_full = FALSE, reclassify_only = FALSE,
                        live_floor = CRAN_NAMES_FLOOR, bioc_floor = BIOC_NAMES_FLOOR) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   recent_path   <- file.path(out_dir, sprintf("%s-recent.db", SHARD_PREFIX))
@@ -45,11 +45,22 @@ run_update <- function(io, out_dir, force_full = FALSE,
   roster        <- load_releases(recent_path)
   prior_summary <- load_summary(recent_path)
 
+  # reclassify-only rebuilds identity from the ledger onto an already-published
+  # roster; it never crawls Launchpad, so an empty roster means there is nothing
+  # to reclassify (never silently no-op into a heartbeat).
+  if (isTRUE(reclassify_only) && nrow(roster) == 0L)
+    stop("reclassify-only needs an existing roster; no recent shard was loaded")
+
   # Load the org identity ledger once for this run (size-gated). On any failure
   # DEGRADE honestly: keep the token as canonical_name and NA identity_state, never
   # abort and never drop a row. The frozen archive self-heals on the next run.
+  # EXCEPTION: reclassify-only must never degrade -- the entire point of the run
+  # is to (re)apply the ledger, so a missing/unreachable ledger there is fatal.
   ledger <- tryCatch(load_gated_maps(io, live_floor, bioc_floor),
                      error = function(e) {
+                       if (isTRUE(reclassify_only))
+                         stop("reclassify-only requires the identity ledger; aborting rather ",
+                              "than republish degraded identity (", conditionMessage(e), ")")
                        message("identity ledger unavailable (", conditionMessage(e),
                                "); degrading to token canonical_name and NA identity_state")
                        NULL
@@ -73,7 +84,8 @@ run_update <- function(io, out_dir, force_full = FALSE,
   }
 
   # ENUMERATE only when cold or forced (the archive is frozen; the roster is static).
-  if (nrow(roster) == 0L || isTRUE(force_full)) {
+  # Never in reclassify-only mode: zero Launchpad calls.
+  if (!isTRUE(reclassify_only) && (nrow(roster) == 0L || isTRUE(force_full))) {
     enabled <- Filter(function(a) isTRUE(a$enabled), ARCHIVES)
     # Enumerate each archive independently so one unreachable archive does not
     # abort the roster for the others.
@@ -94,46 +106,61 @@ run_update <- function(io, out_dir, force_full = FALSE,
   }
 
   # ACTIVE tail: releases never fetched, or with a recent last_day, or force_full.
-  active_cut <- format(today - ACTIVE_WINDOW_DAYS, "%Y-%m-%d")
-  is_active <- isTRUE(force_full) | roster$done == 0L | is.na(roster$last_day) |
-               (!is.na(roster$last_day) & roster$last_day >= active_cut)
-  active <- roster[is_active, , drop = FALSE]
+  # Skipped entirely in reclassify-only mode: no io$fetch/paginate at all, so
+  # zero Launchpad calls. active is forced empty (active_releases = 0 in the
+  # manifest) and daily_new stays empty; the summary rebuilds from daily_hist.
+  if (isTRUE(reclassify_only)) {
+    active <- roster[0, , drop = FALSE]
+    daily_new <- data.frame(package = character(0), date = character(0),
+                            count = integer(0), stringsAsFactors = FALSE)
+  } else {
+    active_cut <- format(today - ACTIVE_WINDOW_DAYS, "%Y-%m-%d")
+    is_active <- isTRUE(force_full) | roster$done == 0L | is.na(roster$last_day) |
+                 (!is.na(roster$last_day) & roster$last_day >= active_cut)
+    active <- roster[is_active, , drop = FALSE]
 
-  counts_acc <- list(); any_fetch <- FALSE
-  for (i in seq_len(nrow(active))) {
-    r <- active[i, ]; a <- archive_by_key(r$archive)
-    sd <- if (isTRUE(force_full) || is.na(r$last_day)) NULL
-          else format(as.Date(r$last_day) - REVISION_WINDOW_DAYS, "%Y-%m-%d")
-    rows <- tryCatch(
-      paginate(io$fetch, lp_counts_url(a, r$pub_id, start_date = sd), parse_counts_page, "rows"),
-      error = function(e) NULL)
-    if (is.null(rows)) next
-    any_fetch <- TRUE
-    idx <- which(roster$archive == r$archive & roster$binary_name == r$binary_name &
-                 roster$version == r$version)
-    roster$done[idx] <- 1L
-    if (nrow(rows) > 0L) {
-      counts_acc[[length(counts_acc) + 1L]] <- rows
-      roster$last_day[idx] <- max(c(r$last_day, rows$day), na.rm = TRUE)
+    counts_acc <- list(); any_fetch <- FALSE
+    for (i in seq_len(nrow(active))) {
+      r <- active[i, ]; a <- archive_by_key(r$archive)
+      sd <- if (isTRUE(force_full) || is.na(r$last_day)) NULL
+            else format(as.Date(r$last_day) - REVISION_WINDOW_DAYS, "%Y-%m-%d")
+      rows <- tryCatch(
+        paginate(io$fetch, lp_counts_url(a, r$pub_id, start_date = sd), parse_counts_page, "rows"),
+        error = function(e) NULL)
+      if (is.null(rows)) next
+      any_fetch <- TRUE
+      idx <- which(roster$archive == r$archive & roster$binary_name == r$binary_name &
+                   roster$version == r$version)
+      roster$done[idx] <- 1L
+      if (nrow(rows) > 0L) {
+        counts_acc[[length(counts_acc) + 1L]] <- rows
+        roster$last_day[idx] <- max(c(r$last_day, rows$day), na.rm = TRUE)
+      }
+    }
+    if (nrow(active) > 0L && !any_fetch) {
+      if (!io$release_exists()) stop("cold start but no counts fetched")
+      return(heartbeat("all count fetches failed"))
+    }
+
+    counts_all <- if (length(counts_acc)) do.call(rbind, counts_acc) else
+      data.frame(binary_name = character(0), version = character(0),
+                 day = character(0), count = integer(0), stringsAsFactors = FALSE)
+    daily_new <- aggregate_counts(counts_all, roster)
+    # Change-gate: a frozen archive with no active releases produces nothing new.
+    # But a cold start with no data must stop, never publish an empty heartbeat.
+    if (nrow(daily_new) == 0L && !isTRUE(force_full)) {
+      if (!io$release_exists()) stop("cold start but no download data was fetched")
+      return(heartbeat("no new download data"))
     }
   }
-  if (nrow(active) > 0L && !any_fetch) {
-    if (!io$release_exists()) stop("cold start but no counts fetched")
-    return(heartbeat("all count fetches failed"))
+  # reclassify-only rebuilds strictly from the already-downloaded shard history
+  # (no re-crawl to merge in); every other path merges in the freshly-fetched tail.
+  daily_all <- if (isTRUE(reclassify_only)) daily_hist else merge_daily(daily_hist, daily_new)
+  if (nrow(daily_all) == 0L) {
+    if (isTRUE(reclassify_only))
+      stop("reclassify-only: no existing daily rows to rebuild the summary")
+    return(heartbeat("no daily rows"))
   }
-
-  counts_all <- if (length(counts_acc)) do.call(rbind, counts_acc) else
-    data.frame(binary_name = character(0), version = character(0),
-               day = character(0), count = integer(0), stringsAsFactors = FALSE)
-  daily_new <- aggregate_counts(counts_all, roster)
-  # Change-gate: a frozen archive with no active releases produces nothing new.
-  # But a cold start with no data must stop, never publish an empty heartbeat.
-  if (nrow(daily_new) == 0L && !isTRUE(force_full)) {
-    if (!io$release_exists()) stop("cold start but no download data was fetched")
-    return(heartbeat("no new download data"))
-  }
-  daily_all <- merge_daily(daily_hist, daily_new)
-  if (nrow(daily_all) == 0L) return(heartbeat("no daily rows"))
 
   con <- DBI::dbConnect(RSQLite::SQLite(), ":memory:")
   on.exit(DBI::dbDisconnect(con), add = TRUE)
@@ -157,7 +184,11 @@ run_update <- function(io, out_dir, force_full = FALSE,
   summary_df <- build_summary(con, roster, anchor, prior_summary = prior_summary)
 
   changed <- character(0); shard_updates <- list()
-  touched <- if (isTRUE(force_full)) sort(unique(substr(daily_all$date, 1, 4)))
+  # reclassify-only touches no year: raw daily history is unchanged, so no year
+  # shard is rewritten. Only the recent + summary shards (and the manifest)
+  # carry the refreshed identity.
+  touched <- if (isTRUE(reclassify_only)) character(0)
+             else if (isTRUE(force_full)) sort(unique(substr(daily_all$date, 1, 4)))
              else sort(unique(substr(daily_new$date, 1, 4)))
   for (yr in touched) {
     f <- sprintf("%s-%s.db", SHARD_PREFIX, yr)
@@ -177,7 +208,8 @@ run_update <- function(io, out_dir, force_full = FALSE,
   out <- list(
     tag = sprintf("v%s", format(now, "%Y%m%d-%H%M%S", tz = "UTC")),
     generated_at = iso(now), last_checked = iso(now), last_changed = iso(now),
-    source_kind = "launchpad", archives = as.list(enabled_keys),
+    source_kind = if (isTRUE(reclassify_only)) "reclassify" else "launchpad",
+    archives = as.list(enabled_keys),
     changed_shards = as.list(changed),
     shards = merge_shard_coverage(prev_shards, shard_updates),
     summary = list(packages = nrow(summary_df), latest_date = anchor,
@@ -251,7 +283,12 @@ default_io <- function() {
 if (sys.nframe() == 0L) {
   args <- commandArgs(trailingOnly = TRUE)
   out_dir <- if (length(args) >= 1L) args[[1]] else "out"
-  force_full <- tolower(Sys.getenv(FORCE_REBUILD_ENV, "")) %in% c("true", "1", "yes")
-  res <- run_update(default_io(), out_dir, force_full)
+  reclassify_only <- tolower(Sys.getenv(RECLASSIFY_ONLY_ENV, "")) %in% c("true", "1", "yes")
+  # force_full and reclassify_only are independent env flags, but reclassify_only
+  # is the cheaper, no-Launchpad path -- if both are set, it wins and force_full
+  # is ignored so the two are never both effectively active.
+  force_full <- !reclassify_only &&
+    tolower(Sys.getenv(FORCE_REBUILD_ENV, "")) %in% c("true", "1", "yes")
+  res <- run_update(default_io(), out_dir, force_full, reclassify_only)
   cat("changed shards:", paste(res$changed_shards, collapse = ", "), "\n")
 }

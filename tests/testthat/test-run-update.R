@@ -162,3 +162,90 @@ test_that("run_update degrades when the identity size gate fails", {
   expect_identical(s$canonical_name, "ggplot2")      # token fallback (gate failed)
   expect_true(is.na(s$identity_state))
 })
+
+test_that("reclassify_only rebuilds identity + summary from history with zero Launchpad calls, touching no year shard", {
+  pub <- withr::local_tempdir(); out1 <- withr::local_tempdir(); out2 <- withr::local_tempdir()
+  a <- ARCHIVES[[1]]
+  led1 <- mk_ledger_dbs(withr::local_tempdir(),
+    cran = c(ggplot2 = "ggplot2"), bioc = c(biobase = "Biobase"), states = c(ggplot2 = "live"))
+  pages <- list()
+  pages[[lp_published_url(a)]] <- paste0(
+    '{"start":0,"total_size":1,"entries":[{"self_link":".../+binarypub/10",',
+    '"binary_package_name":"r-cran-ggplot2","binary_package_version":"3.4.4",',
+    '"distro_arch_series_link":"https://api.launchpad.net/1.0/ubuntu/jammy/amd64",',
+    '"status":"Published","date_published":"2023-10-17T00:00:00+00:00"}]}')
+  pages[[lp_counts_url(a, 10L)]] <-
+    '{"start":0,"total_size":1,"next_collection_link":null,"entries":[
+      {"binary_package_name":"r-cran-ggplot2","binary_package_version":"3.4.4","day":"2026-05-01","count":7}]}'
+  # Seed a prior release with a first normal run: roster + recent shard + a
+  # 2026 year shard + summary, classified "live" by the ledger of the day.
+  res1 <- run_update(fake_io(pub, pages, ledger = led1), out1, live_floor = 1L, bioc_floor = 0L)
+  expect_true(any(grepl("2026", res1$changed_shards)))
+  publish(out1, pub)
+  year_name <- "c2d4u-downloads-2026.db"
+  year_path <- file.path(pub, year_name)
+  expect_true(file.exists(year_path))
+  before_bytes <- readBin(year_path, "raw", file.info(year_path)$size)
+
+  # Second run: reclassify-only, from a ledger that NOW classifies ggplot2 as
+  # "archived". fetch() aborts the test outright if Launchpad is ever contacted.
+  led2 <- mk_ledger_dbs(withr::local_tempdir(),
+    cran = c(ggplot2 = "ggplot2"), bioc = c(biobase = "Biobase"), states = c(ggplot2 = "archived"))
+  io2 <- fake_io(pub, pages = list(), ledger = led2)
+  io2$fetch <- function(...) stop("must not call Launchpad in reclassify mode")
+  res2 <- run_update(io2, out2, reclassify_only = TRUE, live_floor = 1L, bioc_floor = 0L)
+
+  # (a) the run succeeded (reached here without error).
+  # (b) the republished summary carries the ledger's (new) identity_state.
+  con <- DBI::dbConnect(RSQLite::SQLite(), file.path(out2, "c2d4u-downloads-summary.db"))
+  on.exit(DBI::dbDisconnect(con))
+  s <- DBI::dbGetQuery(con, "SELECT package, identity_state FROM c2d4u_downloads_summary")
+  expect_identical(s$package, "ggplot2")
+  expect_identical(s$identity_state, "archived")
+  emb <- DBI::dbConnect(RSQLite::SQLite(), file.path(out2, "c2d4u-downloads-recent.db"))
+  on.exit(DBI::dbDisconnect(emb), add = TRUE)
+  es <- DBI::dbGetQuery(emb, "SELECT identity_state FROM c2d4u_downloads_summary")
+  expect_identical(es$identity_state, "archived")
+
+  # (c) changed_shards is ONLY the recent + summary shards, no year shard.
+  expect_setequal(res2$changed_shards, c("c2d4u-downloads-recent.db", "c2d4u-downloads-summary.db"))
+  expect_false(any(grepl("^c2d4u-downloads-20[0-9]{2}\\.db$", res2$changed_shards)))
+  expect_identical(res2$manifest$summary$active_releases, 0L)
+
+  # (d) the year shard is downloaded (protect-history) but never rewritten:
+  # bytes on disk are identical to what was published after the first run.
+  out2_year_path <- file.path(out2, year_name)
+  expect_true(file.exists(out2_year_path))
+  after_bytes <- readBin(out2_year_path, "raw", file.info(out2_year_path)$size)
+  expect_identical(before_bytes, after_bytes)
+})
+
+test_that("reclassify_only errors when there is no existing roster to reclassify", {
+  pub <- withr::local_tempdir(); out <- withr::local_tempdir()
+  expect_error(
+    run_update(fake_io(pub), out, reclassify_only = TRUE, live_floor = 1L, bioc_floor = 0L),
+    "reclassify-only needs an existing roster")
+})
+
+test_that("reclassify_only errors when the identity ledger is unreachable", {
+  pub <- withr::local_tempdir(); out1 <- withr::local_tempdir(); out2 <- withr::local_tempdir()
+  a <- ARCHIVES[[1]]
+  led <- mk_ledger_dbs(withr::local_tempdir(), cran = c(ggplot2 = "ggplot2"))
+  pages <- list()
+  pages[[lp_published_url(a)]] <- paste0(
+    '{"start":0,"total_size":1,"entries":[{"self_link":".../+binarypub/10",',
+    '"binary_package_name":"r-cran-ggplot2","binary_package_version":"3.4.4",',
+    '"distro_arch_series_link":"https://api.launchpad.net/1.0/ubuntu/jammy/amd64",',
+    '"status":"Published","date_published":"2023-10-17T00:00:00+00:00"}]}')
+  pages[[lp_counts_url(a, 10L)]] <-
+    '{"start":0,"total_size":1,"next_collection_link":null,"entries":[
+      {"binary_package_name":"r-cran-ggplot2","binary_package_version":"3.4.4","day":"2026-05-01","count":7}]}'
+  # Seed a prior release so the roster guard does not preempt the ledger guard.
+  run_update(fake_io(pub, pages, ledger = led), out1, live_floor = 1L, bioc_floor = 0L)
+  publish(out1, pub)
+
+  io2 <- fake_io(pub, pages = list(), fail_identity = TRUE)
+  expect_error(
+    run_update(io2, out2, reclassify_only = TRUE, live_floor = 1L, bioc_floor = 0L),
+    "ledger")
+})

@@ -57,3 +57,6 @@ SUMMARY_COLS <- c(
 
 # Env var used by the CLI entrypoints to force a full re-fetch/rebuild.
 FORCE_REBUILD_ENV <- "C2D4U_FORCE_REBUILD"
+# Env var used by the CLI entrypoint to rebuild identity + summary from the
+# already-downloaded shard history, with zero Launchpad calls.
+RECLASSIFY_ONLY_ENV <- "C2D4U_RECLASSIFY_ONLY"
