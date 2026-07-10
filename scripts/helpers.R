@@ -1,5 +1,48 @@
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
 
+# Build the lowercased-token -> canonical-name and -> identity-state maps from
+# the org identity ledger. Replaces the former live available.packages()/VIEWS
+# fetch: the ledger is append-only (covers archived packages the live index has
+# dropped) and size-gated by the caller. robservatory has already applied
+# cran>bioc precedence into $lookup, so a single merged map is correct. Returns
+# the maps plus table sizes so the caller can size-gate before trusting them.
+build_identity_maps <- function(cran_db_path, bioc_db_path) {
+  maps <- robservatory::load_identity(cran_db_path, bioc_db_path)
+  lk   <- maps$lookup
+  tokens <- ls(lk)
+  canon <- character(length(tokens)); state <- character(length(tokens))
+  for (i in seq_along(tokens)) {
+    r <- get(tokens[i], envir = lk)
+    canon[i] <- r$canonical_name
+    state[i] <- r$identity_state
+  }
+  list(
+    name_map  = stats::setNames(canon, tokens),
+    state_map = stats::setNames(state, tokens),
+    n_cran    = maps$n_cran,
+    n_bioc    = maps$n_bioc)
+}
+
+# The degrade resolver: every lookup misses, so cran/bioc tokens fall back to the
+# token and identity_state is NA. Used when the ledger is unreachable or fails
+# the size gate on the live path, so a run never drops a row or fabricates state.
+empty_identity_maps <- function() list(
+  name_map  = stats::setNames(character(0), character(0)),
+  state_map = stats::setNames(character(0), character(0)),
+  n_cran = 0L, n_bioc = 0L)
+
+# Download the identity assets via io$identity_dbs(), build the maps, and
+# size-gate both tables. Errors (asset unreachable or a failed gate) propagate so
+# the caller decides whether to degrade (live monthly) or abort (bootstrap).
+load_gated_maps <- function(io, live_floor = CRAN_NAMES_FLOOR, bioc_floor = BIOC_NAMES_FLOOR) {
+  dbs  <- io$identity_dbs()
+  maps <- build_identity_maps(dbs$cran, dbs$bioc)
+  if (!robservatory::check_size(maps$n_cran, floor = live_floor) ||
+      !robservatory::check_size(maps$n_bioc, floor = bioc_floor))
+    stop("identity size gate failed (cran=", maps$n_cran, ", bioc=", maps$n_bioc, ")")
+  maps
+}
+
 lp_archive_ref <- function(archive) {
   sprintf("%s/~%s/+archive/ubuntu/%s",
           LP_API_BASE, archive$owner, utils::URLencode(archive$ref, reserved = TRUE))
