@@ -441,7 +441,7 @@ load_releases <- function(path) {
   on.exit(DBI::dbDisconnect(con), add = TRUE)
   if (!RELEASES_TABLE %in% DBI::dbListTables(con)) return(.empty_releases())
   df <- DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", RELEASES_TABLE))
-  if (!"identity_state" %in% names(df)) df$identity_state <- NA_character_
+  if (!"identity_state" %in% names(df)) df$identity_state <- rep(NA_character_, nrow(df))
   df
 }
 

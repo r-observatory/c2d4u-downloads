@@ -52,3 +52,50 @@ test_that("build_roster carries origin, canonical_name, and identity_state", {
   expect_identical(r$identity_state, "archived")
   expect_true("identity_state" %in% names(r))
 })
+
+# Old-schema releases table: the column set before identity_state was added
+# (releases_table_ddl minus the identity_state line), built directly so the
+# migration branch in load_releases is exercised on a table that predates the
+# column.
+.old_schema_releases_ddl <- function(table) sprintf(
+  "CREATE TABLE %s (
+     archive        TEXT,
+     binary_name    TEXT,
+     version        TEXT,
+     pub_id         INTEGER,
+     package        TEXT,
+     origin         TEXT,
+     canonical_name TEXT,
+     cnt_total      INTEGER,
+     last_day       TEXT,
+     done           INTEGER,
+     PRIMARY KEY (archive, binary_name, version))", table)
+
+test_that("load_releases migrates a zero-row old-schema table without erroring", {
+  p <- withr::local_tempfile(fileext = ".db")
+  con <- DBI::dbConnect(RSQLite::SQLite(), p)
+  DBI::dbExecute(con, .old_schema_releases_ddl(RELEASES_TABLE))
+  DBI::dbDisconnect(con)
+
+  got <- load_releases(p)
+  expect_identical(nrow(got), 0L)
+  expect_true("identity_state" %in% names(got))
+  expect_identical(got$identity_state, character(0))
+})
+
+test_that("load_releases backfills identity_state as NA for an old-schema row", {
+  p <- withr::local_tempfile(fileext = ".db")
+  con <- DBI::dbConnect(RSQLite::SQLite(), p)
+  DBI::dbExecute(con, .old_schema_releases_ddl(RELEASES_TABLE))
+  DBI::dbWriteTable(con, RELEASES_TABLE, data.frame(
+    archive = "c2d4u4.0+", binary_name = "r-cran-a", version = "v", pub_id = 1L,
+    package = "a", origin = "cran", canonical_name = "A",
+    cnt_total = 1L, last_day = "2026-01-01", done = 1L,
+    stringsAsFactors = FALSE), append = TRUE)
+  DBI::dbDisconnect(con)
+
+  got <- load_releases(p)
+  expect_identical(nrow(got), 1L)
+  expect_true("identity_state" %in% names(got))
+  expect_identical(got$identity_state, NA_character_)
+})
