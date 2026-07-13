@@ -51,3 +51,7 @@ enumerate binaries, `getDownloadCounts` for per-day rows). The one-time bootstra
 runs as a sharded GitHub Actions job (`backfill.yml`); a monthly job
 (`update.yml`) re-fetches the still-active tail of releases and rebuilds the
 changed shards.
+
+## Feedback
+
+Found a bug, a wrong number, or a missing package? Report it at [r-observatory/feedback](https://github.com/r-observatory/feedback/issues/new/choose). All feedback about R Observatory, the site, the data, and the pipelines, is tracked in one place.
