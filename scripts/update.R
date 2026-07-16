@@ -214,7 +214,15 @@ run_update <- function(io, out_dir, force_full = FALSE, reclassify_only = FALSE,
     shards = merge_shard_coverage(prev_shards, shard_updates),
     summary = list(packages = nrow(summary_df), latest_date = anchor,
                    releases = nrow(roster), active_releases = nrow(active)))
-  write_manifest(manifest_path, out)
+  # Integrity/completeness core describing the finalized summary DB (the asset the
+  # downstream merge consumes), computed from its exact on-disk bytes after
+  # export_summary_shard above. complete = TRUE: the DB holds the full, non-partial
+  # dataset (a full teardown-and-rebuild every run over the entire loaded daily
+  # history: the recent shard plus every year shard of a frozen, static archive,
+  # not an incremental/partial one). Freshness is tracked separately via
+  # generated_at and the run tag, so complete describes coverage, not recency.
+  core <- summary_integrity_core(summary_path, complete = TRUE)
+  write_manifest(manifest_path, out, core = core)
   write_release_notes(file.path(out_dir, "release_notes.md"), out)
   list(changed_shards = changed, manifest = out)
 }
