@@ -3,8 +3,13 @@ on:
   workflow_dispatch: {}
 permissions:
   contents: write
+# One group with update.yml, so a backfill and the monthly update never fetch
+# from Launchpad at the same time and the update never starts from a release
+# this run is still publishing. Workflow level, so the group spans enumerate,
+# fetch and merge. GitHub keeps one pending run per group: a run queued behind
+# a running one replaces any run that was already pending.
 concurrency:
-  group: c2d4u-downloads-backfill
+  group: c2d4u-downloads-launchpad
   cancel-in-progress: false
 jobs:
   enumerate:
@@ -50,7 +55,9 @@ jobs:
     strategy:
       fail-fast: false
       # THROTTLE CAP: Launchpad throttles above ~16-24 aggregate connections.
-      # Keep max-parallel * C2D4U_POOL <= ~24 (here 4 * 6 = 24).
+      # Keep max-parallel * C2D4U_POOL <= ~24 (here 4 * 6 = 24). A shard's
+      # residual retry pass is serial and starts only after its pool has
+      # finished, so a shard never holds both at once and the peak stays 24.
       max-parallel: 4
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
@@ -80,6 +87,8 @@ jobs:
           C2D4U_SHARD_I: ${{ matrix.shard }}
           C2D4U_SHARD_N: "12"
           C2D4U_POOL: "6"
+          # Minutes for the serial retry of releases the pool left unfetched.
+          C2D4U_RETRY_BUDGET_MIN: "60"
       - uses: actions/upload-artifact@v7
         with:
           name: shard-${{ matrix.shard }}
@@ -106,6 +115,8 @@ jobs:
             github::r-observatory/robservatory@v0.1.0
       - uses: actions/download-artifact@v8
         with: { path: parts, pattern: shard-*, merge-multiple: true }
+      - uses: actions/download-artifact@v8
+        with: { name: roster, path: roster }
       - name: Merge shards
         run: |
           mkdir -p out
@@ -113,6 +124,27 @@ jobs:
         env:
           C2D4U_OUT: out
           C2D4U_PARTS: parts
+          # The merge refuses to publish unless it has a part for every shard
+          # 0..N-1 and their rosters add up to the enumerated roster, so a
+          # shard that uploaded nothing stops the run instead of dropping a
+          # twelfth of the releases. Must match the fetch matrix.
+          C2D4U_SHARD_N: "12"
+          C2D4U_ROSTER: roster
+          # The merge reads the published release to check that the new
+          # history is no smaller than it; without a token gh cannot see the
+          # release at all.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Keep what is about to be published. The upload below goes one asset at
+      # a time with the manifest last, and `gh release upload --clobber`
+      # deletes an asset before uploading its replacement, so a failure partway
+      # leaves a torn release or one missing an asset; this artifact lets it be
+      # completed by uploading the same files again, without fetching anything
+      # (see the README). Kept 90 days, longer than the monthly cadence.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: backfill-out-attempt-${{ github.run_attempt }}
+          path: out/
+          retention-days: 90
       - name: Publish to "current" release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -126,11 +158,14 @@ jobs:
               --notes-file out/release_notes.md \
               --latest
           fi
-          CHANGED=$(jq -r '.changed_shards[]' out/manifest.json)
-          for asset in $CHANGED; do
-            if [ -f "out/$asset" ]; then
-              gh release upload current "out/$asset" --clobber
-            fi
-          done
+          # Upload the assets the merge built, each checked on disk before
+          # anything is uploaded, then the manifest last.
+          [ -f out/upload-list.txt ] || { echo "::error::out/upload-list.txt is missing"; exit 1; }
+          while IFS= read -r asset <&3; do
+            [ -f "out/$asset" ] || { echo "::error::out/$asset is listed for upload but missing"; exit 1; }
+          done 3< out/upload-list.txt
+          while IFS= read -r asset <&3; do
+            gh release upload current "out/$asset" --clobber
+          done 3< out/upload-list.txt
           gh release upload current out/manifest.json --clobber
           gh release edit current --notes-file out/release_notes.md

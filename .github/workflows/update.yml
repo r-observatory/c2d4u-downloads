@@ -1,26 +1,30 @@
 name: Update c2d4u Downloads
 on:
   schedule:
-    # Monthly on the 3rd at 05:45 UTC. The source is frozen and Launchpad's
-    # reported day lags ~60 days, so a daily cron would be wasted work.
+    # Monthly on the 3rd at 05:45 UTC. The archive is frozen and its counts
+    # move slowly, so a daily cron would be wasted work. Launchpad reports a
+    # day within a day of it ending; the update counts through two days before
+    # it runs.
     - cron: "45 5 3 * *"
   workflow_dispatch:
     inputs:
-      force_full_rebuild:
-        description: "Re-enumerate and re-fetch every release, rebuild all shards."
-        type: boolean
-        default: false
       reclassify_only:
         description: "Rebuild identity + summary from the already-downloaded shard history, with no Launchpad calls."
         type: boolean
         default: false
 permissions:
   contents: write
-concurrency:
-  group: c2d4u-downloads-update
-  cancel-in-progress: false
 jobs:
   update:
+    # One group with backfill.yml, so the update and a backfill never fetch
+    # from Launchpad at the same time and the update never starts from a
+    # release a backfill is still publishing. Job level, so the keepalive job
+    # below is neither held nor cancelled with it. GitHub keeps one pending
+    # run per group: a run queued behind a running one replaces any run that
+    # was already pending.
+    concurrency:
+      group: c2d4u-downloads-launchpad
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
@@ -42,18 +46,44 @@ jobs:
       - name: Run unit tests
         run: Rscript tests/testthat.R
       - name: Run update script
+        # Below the job's 350 minutes, so a run that overruns fails here and a
+        # timeout can never cancel the job partway through the publish step.
+        # The script stops fetching at C2D4U_DEADLINE_MIN, which leaves room
+        # under this limit for the rebuild and the export.
+        timeout-minutes: 330
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          C2D4U_FORCE_REBUILD: ${{ inputs.force_full_rebuild }}
           C2D4U_RECLASSIFY_ONLY: ${{ inputs.reclassify_only }}
+          # A lone job in the Launchpad group, so it can use more connections
+          # than one backfill shard.
+          C2D4U_POOL: "8"
+          C2D4U_DEADLINE_MIN: "280"
         run: |
           mkdir -p out
           Rscript scripts/update.R out/
+      # Keep what is about to be published. The upload below goes one asset at
+      # a time with the manifest last, and `gh release upload --clobber`
+      # deletes an asset before uploading its replacement, so a failure partway
+      # leaves a torn release or one missing an asset; this artifact lets it be
+      # completed by uploading the same files again, without fetching anything
+      # (see the README). Kept 90 days, longer than the monthly cadence, so it
+      # outlives the month it may take to notice. A run with nothing to publish
+      # writes out/skip-publish and has nothing to keep.
+      - uses: actions/upload-artifact@v7
+        if: hashFiles('out/skip-publish') == ''
+        with:
+          name: update-out-attempt-${{ github.run_attempt }}
+          path: out/
+          retention-days: 90
       - name: Publish changed shards to "current" release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          if [ -f out/skip-publish ]; then
+            echo "update wrote out/skip-publish: nothing new to publish, release left as it is"
+            exit 0
+          fi
           if ! gh release view current >/dev/null 2>&1; then
             git tag -f current
             git push -f origin current || true
@@ -62,14 +92,16 @@ jobs:
               --notes-file out/release_notes.md \
               --latest
           fi
-          CHANGED=$(jq -r '.changed_shards[]' out/manifest.json)
-          for asset in $CHANGED; do
-            if [ -f "out/$asset" ]; then
-              gh release upload current "out/$asset" --clobber
-            else
-              echo "WARNING: $asset in manifest but not on disk"
-            fi
-          done
+          # Upload only the assets this run rebuilt (a heartbeat rebuilds none),
+          # each checked on disk before anything is uploaded, then the
+          # manifest last.
+          [ -f out/upload-list.txt ] || { echo "::error::out/upload-list.txt is missing"; exit 1; }
+          while IFS= read -r asset <&3; do
+            [ -f "out/$asset" ] || { echo "::error::out/$asset is listed for upload but missing"; exit 1; }
+          done 3< out/upload-list.txt
+          while IFS= read -r asset <&3; do
+            gh release upload current "out/$asset" --clobber
+          done 3< out/upload-list.txt
           gh release upload current out/manifest.json --clobber
           gh release edit current --notes-file out/release_notes.md
   keepalive:

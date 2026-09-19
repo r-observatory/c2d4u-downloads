@@ -44,11 +44,25 @@ test_that("enumerate_names queries each candidate and tags rows with the archive
     '"status":"Published","date_published":"2023-10-17T00:00:00+00:00"}]}')
   # r-cran-missing has no page -> fetch returns NULL (a 503/404), contributes nothing
   fetch_many <- function(urls) lapply(urls, function(u) pages[[u]] %||% NULL)
-  ent <- enumerate_names(fetch_many, c("r-cran-ggplot2", "r-cran-missing"), a)
+  msgs <- testthat::capture_messages(
+    ent <- enumerate_names(fetch_many, c("r-cran-ggplot2", "r-cran-missing"), a))
   expect_identical(nrow(ent), 1L)
   expect_identical(ent$binary_name, "r-cran-ggplot2")
   expect_identical(ent$pub_id, 10L)
   expect_identical(unique(ent$archive), a$key)
+  # a failed name contributes no releases, so it has to show up in the log
+  expect_true(any(grepl("enumerate c2d4u4.0+: 1 of 2 candidate names failed (r-cran-missing)",
+                        msgs, fixed = TRUE)))
+})
+
+test_that("enumerate_names lists at most ten of the names that failed", {
+  failing <- sprintf("r-cran-gone%02d", 1:12)
+  msgs <- testthat::capture_messages(
+    ent <- enumerate_names(function(urls) vector("list", length(urls)), failing, ARCHIVES[[1]]))
+  expect_identical(nrow(ent), 0L)
+  expect_true("archive" %in% names(ent))
+  expect_true(any(grepl(sprintf("12 of 12 candidate names failed (%s, ...)",
+                                paste(failing[1:10], collapse = ", ")), msgs, fixed = TRUE)))
 })
 
 test_that("enumerate_names follows next_collection_link across pages", {

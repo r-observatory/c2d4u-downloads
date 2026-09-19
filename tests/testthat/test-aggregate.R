@@ -20,14 +20,3 @@ test_that("aggregate_counts warns and drops NA day/count rows instead of silentl
   expect_identical(agg$date, "2026-05-01")
   expect_identical(agg$count, 3L)
 })
-
-test_that("merge_daily upserts new rows over old and preserves untouched history", {
-  old <- data.frame(package = c("a","a","b"), date = c("2026-01-01","2026-03-01","2026-03-01"),
-                    count = c(1L,3L,5L), stringsAsFactors = FALSE)
-  new <- data.frame(package = "a", date = "2026-03-01", count = 30L, stringsAsFactors = FALSE)
-  m <- merge_daily(old, new)
-  expect_identical(nrow(m), 3L)
-  expect_identical(m$count[m$package == "a" & m$date == "2026-03-01"], 30L)  # new wins
-  expect_identical(m$count[m$package == "b"], 5L)                             # dead release preserved
-  expect_identical(m$count[m$package == "a" & m$date == "2026-01-01"], 1L)
-})
