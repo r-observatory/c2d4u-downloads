@@ -6,8 +6,10 @@
 # (the server-side scan is too expensive past ~12,900 entries). This bootstrap
 # instead enumerates the roster with cheap, reliable per-package-name filtered
 # queries (binary_name=<name>&exact_match=true), one query per candidate binary
-# name. It fetches all download counts, builds the published shards + summary +
-# manifest into out/, and (only in `run` mode) publishes to the GitHub release.
+# name. It fetches all download counts and builds shards + summary + manifest
+# into out/ for local inspection. It never publishes: its output carries no
+# fetch records and no summed-history contract and covers one archive, so the
+# monthly update would refuse it. Publishing is done by backfill.yml.
 #
 # Every stage is resumable via checkpoint files under bootstrap-state/:
 #   queried-names.rds  names that returned HTTP 200 (skip on resume)
@@ -16,10 +18,12 @@
 #   counts-done.rds    pub_ids whose counts were fully fetched
 #   daily-<key>.rds    per-first-letter aggregated daily frames
 #
-# Usage: Rscript scripts/local-bootstrap.R <validate|run> [limit]
-#   validate  restrict to a tiny 5-name slice; build to out/, do NOT publish
-#   run       full candidate universe; build to out/ and publish
+# Usage: Rscript scripts/local-bootstrap.R <validate|build> [limit]
+#   validate  restrict to a tiny 5-name slice; build to out/
+#   build     full candidate universe; build to out/
 #   limit     optional cap on the number of candidate names (testing)
+# The former `run` mode, which also uploaded out/ to the `current` release,
+# now stops before doing anything.
 
 options(timeout = 600)
 
@@ -357,41 +361,16 @@ build_outputs <- function(daily_all, roster) {
 }
 
 # ---------------------------------------------------------------------------
-# STAGE 4: PUBLISH to the GitHub release (only in `run` mode).
-gh_run <- function(args) suppressWarnings(system2("gh", args, stdout = TRUE, stderr = TRUE))
-gh_ok  <- function(args) identical(as.integer(attr(gh_run(args), "status") %||% 0L), 0L)
-
-publish <- function() {
-  notes <- file.path(OUT_DIR, "release_notes.md")
-  if (!gh_ok(c("release", "view", "current", "--repo", PUBLISH_REPO))) {
-    lg("publish: release 'current' absent; creating tag + release")
-    suppressWarnings(system2("git", c("tag", "current"), stdout = TRUE, stderr = TRUE))
-    suppressWarnings(system2("git", c("push", "origin", "current"), stdout = TRUE, stderr = TRUE))
-    gh_run(c("release", "create", "current", "--repo", PUBLISH_REPO,
-             "--notes-file", notes, "--latest"))
-  }
-  dbs <- list.files(OUT_DIR, pattern = "\\.db$", full.names = TRUE)
-  for (f in dbs) {
-    lg("publish: upload %s", basename(f))
-    gh_run(c("release", "upload", "current", "--repo", PUBLISH_REPO, f, "--clobber"))
-  }
-  # Manifest last, so a partial upload never advertises shards that are not there.
-  lg("publish: upload manifest.json (last)")
-  gh_run(c("release", "upload", "current", "--repo", PUBLISH_REPO,
-           file.path(OUT_DIR, "manifest.json"), "--clobber"))
-  gh_run(c("release", "edit", "current", "--repo", PUBLISH_REPO, "--notes-file", notes))
-  lg("publish: done")
-}
-
-# ---------------------------------------------------------------------------
 # Driver.
 main <- function(mode, limit = NA_integer_) {
-  if (!mode %in% c("validate", "run")) stop("usage: local-bootstrap.R <validate|run> [limit]")
+  if (identical(mode, "run"))
+    stop("publishing is done by backfill.yml: a local build is not a summed release the ",
+         "monthly update accepts. Use `build` to build into out/ without publishing.", call. = FALSE)
+  if (!mode %in% c("validate", "build")) stop("usage: local-bootstrap.R <validate|build> [limit]")
   ensure_dirs()
-  do_publish  <- (mode == "run")
   force_build <- tolower(Sys.getenv("C2D4U_FORCE_BUILD", "")) %in% c("1", "true", "yes")
 
-  lg("mode=%s  force_build=%s  publish=%s", mode, force_build, do_publish)
+  lg("mode=%s  force_build=%s", mode, force_build)
 
   # Name universe (candidate binary names) still comes from the live indexes.
   lg("building candidate name universe ...")
@@ -443,7 +422,7 @@ main <- function(mode, limit = NA_integer_) {
     cat("\n")
   }
 
-  if (do_publish) { lg("publishing ..."); publish() } else lg("validate mode: NOT publishing.")
+  lg("local build only; publishing is done by backfill.yml.")
   invisible()
 }
 
