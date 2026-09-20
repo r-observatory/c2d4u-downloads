@@ -88,7 +88,7 @@ jobs:
           C2D4U_SHARD_N: "12"
           C2D4U_POOL: "6"
           # Minutes for the serial retry of releases the pool left unfetched.
-          C2D4U_RETRY_BUDGET_MIN: "60"
+          C2D4U_RETRY_BUDGET_MIN: "150"
       - uses: actions/upload-artifact@v7
         with:
           name: shard-${{ matrix.shard }}

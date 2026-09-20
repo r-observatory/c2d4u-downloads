@@ -64,8 +64,12 @@ DORMANT_PROBE_N      <- 50L
 # queued monthly update). Longer ago, they have been loaded.
 CHANGED_SHARDS_CARRY_DAYS <- 7
 # Minutes a backfill fetch shard may spend retrying, one release at a time,
-# what its concurrent pool could not fetch (CLI: C2D4U_RETRY_BUDGET_MIN).
-RETRY_BUDGET_MIN     <- 60
+# what its concurrent pool could not fetch (CLI: C2D4U_RETRY_BUDGET_MIN). The
+# pool leaves more behind as Launchpad throttles a long run: the 2026-09-20
+# backfill left up to 2,913 releases in a shard, and the retry cleared about 36
+# a minute, so 60 minutes ran out with 750 still unfetched and the merge refused
+# to publish a shortfall.
+RETRY_BUDGET_MIN     <- 150
 
 # Date ranges where Launchpad itself recorded nothing for every publication, so
 # a run of zero-download days inside one is a source hole, not a stall of ours.

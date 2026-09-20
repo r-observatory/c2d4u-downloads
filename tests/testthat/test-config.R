@@ -67,7 +67,7 @@ test_that("config.R alone holds the entrypoints' tunables and env var names", {
   expect_identical(e$CHANGED_SHARDS_CARRY_DAYS, 7)
   expect_identical(e$STALL_MAX_DAYS, 90L)
   expect_identical(e$DORMANT_PROBE_N, 50L)
-  expect_identical(e$RETRY_BUDGET_MIN, 60)
+  expect_identical(e$RETRY_BUDGET_MIN, 150)
   expect_identical(e$DEADLINE_MIN_ENV, "C2D4U_DEADLINE_MIN")
   expect_identical(e$RECLASSIFY_ONLY_ENV, "C2D4U_RECLASSIFY_ONLY")
   expect_identical(e$FORCE_REBUILD_ENV, "C2D4U_FORCE_REBUILD")
