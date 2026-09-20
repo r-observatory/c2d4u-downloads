@@ -31,3 +31,10 @@ test_that("build_roster resolves identities and drops toolchain", {
   expect_identical(r$done, 0L)
   expect_true(is.na(r$last_day))
 })
+
+test_that("the enumerate says how to repair a release that lost its recent shard", {
+  io <- bf_io(list())
+  io$release_exists <- function() TRUE
+  err <- expect_error(published_roster(io), "published roster")
+  expect_match(conditionMessage(err), "artifact")
+})

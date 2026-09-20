@@ -6,22 +6,24 @@ test_that("lp_archive_ref encodes the plus and owner", {
     "https://api.launchpad.net/1.0/~marutter/+archive/ubuntu/c2d4u3.5")
 })
 
-test_that("lp_published_url builds a filtered, paged enumeration URL", {
-  u <- lp_published_url(ARCHIVES[[1]], start = 300L, size = 300L, status = "Published")
-  expect_match(u, "ws.op=getPublishedBinaries")
-  expect_match(u, "ordered=false")  # required to page deep without 503s
-  expect_match(u, "ws.size=300")
-  expect_match(u, "ws.start=300")
-  expect_match(u, "status=Published")
-  expect_match(u, "c2d4u4.0%2B")
-})
-
 test_that("lp_counts_url targets a binarypub and honours start_date", {
   u <- lp_counts_url(ARCHIVES[[1]], 198161808L, start_date = "2026-01-01")
   expect_match(u, "/\\+binarypub/198161808\\?")
   expect_match(u, "ws.op=getDownloadCounts")
   expect_match(u, "start_date=2026-01-01")
   expect_false(grepl("start_date", lp_counts_url(ARCHIVES[[1]], 1L)))
+})
+
+test_that("lp_counts_url appends an inclusive end_date only when given", {
+  a <- ARCHIVES[[1]]
+  both <- lp_counts_url(a, 7L, start_date = "2026-08-01", end_date = "2026-09-16")
+  expect_match(both, "&start_date=2026-08-01&end_date=2026-09-16$")
+  expect_match(lp_counts_url(a, 7L, end_date = "2026-09-16"),
+               "ws.size=300&end_date=2026-09-16$")
+  expect_false(grepl("end_date", lp_counts_url(a, 7L, start_date = "2026-08-01")))
+  expect_false(grepl("end_date", lp_counts_url(a, 7L)))
+  # size stays a trailing argument, so existing positional callers are unaffected
+  expect_match(lp_counts_url(a, 7L, size = 50L), "ws.size=50$")
 })
 
 test_that("lp_pub_id and parse_arch extract trailing path segments", {

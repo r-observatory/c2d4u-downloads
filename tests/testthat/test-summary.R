@@ -99,3 +99,21 @@ test_that("load_summary migrates a 0-row old shard without crashing", {
   expect_identical(names(s), SUMMARY_COLS)
   expect_identical(s$identity_state, character(0))
 })
+
+test_that("build_summary anchors a package in edges on its own day", {
+  df <- data.frame(package = c(rep("held", 3), "fresh"),
+                   date = c("2026-04-10", "2026-05-20", "2026-06-01", "2026-06-25"),
+                   count = c(7L, 4L, 6L, 9L), stringsAsFactors = FALSE)
+  con <- mk_daily_con(df); on.exit(DBI::dbDisconnect(con))
+  ident <- resolve_identities(c("r-cran-held", "r-cran-fresh"), mk_maps())
+  s <- build_summary(con, ident, "2026-06-30", edges = list(held = "2026-06-01"))
+  # held: 30 days back from 2026-06-01 hold 4 + 6; the 30 before that hold 7
+  expect_identical(s$total_30d[s$package == "held"], 10L)
+  expect_identical(s$trend[s$package == "held"], round((10 / 7 - 1) * 100, 2))
+  expect_identical(s$total_30d[s$package == "fresh"], 9L)
+  expect_identical(s$rank_30d[s$package == "held"], 1L)
+  # without edges both end on the anchor, and the temp table is gone either way
+  s0 <- build_summary(con, ident, "2026-06-30")
+  expect_identical(s0$total_30d[s0$package == "held"], 6L)
+  expect_false("c2d4u_summary_anchor" %in% DBI::dbListTables(con))
+})

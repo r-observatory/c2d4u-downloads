@@ -23,3 +23,12 @@ test_that("load_releases returns typed empty frame when table absent", {
                     "origin","canonical_name","identity_state","cnt_total","last_day","done")
                   %in% names(got)))
 })
+
+test_that("the roster keeps every state of done through embed_aux and load_releases", {
+  p <- withr::local_tempfile(fileext = ".db")
+  export_shard(p, data.frame(package = "a", date = "2026-01-01", count = 1L))
+  rel <- mk_roster(c("r-cran-a", "r-cran-b", "r-cran-c"), last_day = c("2026-01-01", NA, NA),
+                   done = c(1L, 2L, 0L))
+  embed_aux(p, empty_summary(), rel)
+  expect_identical(load_releases(p)$done, c(1L, 2L, 0L))
+})

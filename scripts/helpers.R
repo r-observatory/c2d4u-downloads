@@ -48,23 +48,16 @@ lp_archive_ref <- function(archive) {
           LP_API_BASE, archive$owner, utils::URLencode(archive$ref, reserved = TRUE))
 }
 
-lp_published_url <- function(archive, start = 0L, size = PAGE_SIZE, status = NULL) {
-  # ordered=false is REQUIRED: the default ordered=true forces an expensive
-  # server-side sort that intermittently returns HTTP 503 on deep offsets
-  # (past ~12,900 entries), which makes the ~326k-entry whole-archive sweep
-  # impossible. ordered=false pages reliably at any depth and ~3x faster; order
-  # is irrelevant since we page the complete set and dedupe. Launchpad echoes
-  # the param into next_collection_link, so every paged request keeps it.
-  u <- sprintf("%s?ws.op=getPublishedBinaries&ordered=false&ws.size=%d&ws.start=%d",
-               lp_archive_ref(archive), as.integer(size), as.integer(start))
-  if (!is.null(status)) u <- paste0(u, "&status=", status)
-  u
-}
-
-lp_counts_url <- function(archive, pub_id, start_date = NULL, size = PAGE_SIZE) {
+# getDownloadCounts for one publication. start_date and end_date are both
+# inclusive, and Launchpad keeps both in next_collection_link, so paging stays
+# inside the window. Recent rows carry no per-country split (one row per day),
+# so a window shorter than PAGE_SIZE days is normally a single page.
+lp_counts_url <- function(archive, pub_id, start_date = NULL, end_date = NULL,
+                          size = PAGE_SIZE) {
   u <- sprintf("%s/+binarypub/%d?ws.op=getDownloadCounts&ws.size=%d",
                lp_archive_ref(archive), as.integer(pub_id), as.integer(size))
   if (!is.null(start_date)) u <- paste0(u, "&start_date=", start_date)
+  if (!is.null(end_date))   u <- paste0(u, "&end_date=", end_date)
   u
 }
 
@@ -99,6 +92,9 @@ parse_published_page <- function(txt) {
   list(entries = entries, next_link = if (is.null(nl)) NA_character_ else as.character(nl))
 }
 
+# One getDownloadCounts page: its rows, the next page's url (NA on the last)
+# and total, the size of the whole collection Launchpad reports on every page
+# (NA when the page does not carry it).
 parse_counts_page <- function(txt) {
   j <- jsonlite::fromJSON(txt, simplifyVector = TRUE)
   e <- j$entries
@@ -114,8 +110,26 @@ parse_counts_page <- function(txt) {
       stringsAsFactors = FALSE)
   }
   nl <- j$next_collection_link
-  list(rows = rows, next_link = if (is.null(nl)) NA_character_ else as.character(nl))
+  total <- suppressWarnings(as.numeric(j$total_size))
+  list(rows = rows, next_link = if (is.null(nl)) NA_character_ else as.character(nl),
+       total = if (length(total) == 1L) total else NA_real_)
 }
+
+# Whether the rows one item's pages returned are all of it, and each once: a
+# first page that reported the collection's total (`total`, NA when it did not)
+# must be matched by exactly that many rows. A later page that answers empty
+# with no next link ends the paging early, which otherwise reads as a complete
+# answer. More rows mean the collection grew while it was paged: pages are cut
+# by offset over a list sorted newest day first, so a row Launchpad adds before
+# the next page shifts it by one and it repeats the row before, which summed
+# would overcount that day for good.
+all_rows_came <- function(rows, total) is.na(total) || NROW(rows) == total
+
+# Whether a later page's total (NULL or NA when it reports none) agrees with
+# the first page's (NA when it reported none). A different total is a
+# collection that changed while it was paged, even when the rows add up.
+same_total <- function(first, later)
+  is.na(first) || length(later) != 1L || is.na(later) || later == first
 
 parse_views_packages <- function(views_text) {
   lines <- unlist(strsplit(views_text, "\n", fixed = TRUE))
@@ -191,17 +205,6 @@ aggregate_counts <- function(counts_df, identity_df) {
   agg
 }
 
-merge_daily <- function(old_df, new_df) {
-  out <- rbind(old_df, new_df)
-  out <- out[order(out$package, out$date), , drop = FALSE]
-  key <- paste(out$package, out$date)
-  # On a (package,date) conflict new_df wins because it is appended last;
-  # keep the LAST occurrence of each key. Rows only in old_df are preserved.
-  out <- out[!duplicated(key, fromLast = TRUE), , drop = FALSE]
-  rownames(out) <- NULL
-  out
-}
-
 daily_table_ddl <- function(table) sprintf(
   "CREATE TABLE %s (
      package TEXT    NOT NULL,
@@ -228,6 +231,17 @@ summary_table_ddl <- function(table) sprintf(
      cnt_total     INTEGER,
      identity_state TEXT,
      PRIMARY KEY (package))", table)
+
+# The roster's done column says how far a release's full history is known:
+#   0  never fetched (or its fetch failed): unfetched
+#   2  fetched in full once, and Launchpad answered no rows: empty once. A
+#      single empty page can be a transient answer, so the monthly update asks
+#      for the whole history again before believing it.
+#   1  settled: fetched with rows (last_day is its newest day), or answered
+#      empty twice (last_day NA: never downloaded)
+# A missing or unknown value counts as never fetched.
+count_unfetched  <- function(done) sum(is.na(done) | !done %in% c(1L, 2L))
+count_empty_once <- function(done) sum(done %in% 2L)
 
 releases_table_ddl <- function(table) sprintf(
   "CREATE TABLE %s (
@@ -296,17 +310,36 @@ empty_summary <- function() {
              stringsAsFactors = FALSE)
 }
 
-build_summary <- function(daily_con, identity_df, anchor_date, prior_summary = NULL) {
+# The summary's 30/90/365-day windows and trend end on anchor_date. `edges`
+# ({package: YYYY-MM-DD}, a manifest's package_edges) anchors each listed
+# package on its own day instead: its data stops there, so windows ending on
+# anchor_date would count only the days up to it and make the package look
+# as if its downloads had collapsed.
+build_summary <- function(daily_con, identity_df, anchor_date, prior_summary = NULL,
+                          edges = NULL) {
   a <- format(as.Date(anchor_date), "%Y-%m-%d")
+  anchors <- if (length(edges) == 0L)
+    data.frame(package = character(0), anchor = character(0), stringsAsFactors = FALSE)
+  else data.frame(package = names(edges),
+                  anchor = format(as.Date(as.character(unlist(edges, use.names = FALSE)))),
+                  stringsAsFactors = FALSE)
+  DBI::dbExecute(daily_con, "DROP TABLE IF EXISTS temp.c2d4u_summary_anchor")
+  DBI::dbExecute(daily_con,
+    "CREATE TEMP TABLE c2d4u_summary_anchor (package TEXT PRIMARY KEY, anchor TEXT NOT NULL)")
+  on.exit(DBI::dbExecute(daily_con, "DROP TABLE IF EXISTS temp.c2d4u_summary_anchor"), add = TRUE)
+  if (nrow(anchors) > 0L)
+    DBI::dbWriteTable(daily_con, "c2d4u_summary_anchor", anchors, append = TRUE)
   agg <- DBI::dbGetQuery(daily_con, sprintf("
     SELECT package,
       MIN(date) AS first_date, MAX(date) AS last_date, SUM(count) AS cnt_total,
-      SUM(CASE WHEN date >= date('%1$s','-30 days')  THEN count ELSE 0 END) AS total_30d,
-      SUM(CASE WHEN date >= date('%1$s','-90 days')  THEN count ELSE 0 END) AS total_90d,
-      SUM(CASE WHEN date >= date('%1$s','-365 days') THEN count ELSE 0 END) AS total_365d,
-      SUM(CASE WHEN date >  date('%1$s','-60 days')
-                AND date <  date('%1$s','-30 days') THEN count ELSE 0 END) AS prev_30d
-    FROM %2$s GROUP BY package", a, DAILY_TABLE))
+      SUM(CASE WHEN date >= date(a,'-30 days')  THEN count ELSE 0 END) AS total_30d,
+      SUM(CASE WHEN date >= date(a,'-90 days')  THEN count ELSE 0 END) AS total_90d,
+      SUM(CASE WHEN date >= date(a,'-365 days') THEN count ELSE 0 END) AS total_365d,
+      SUM(CASE WHEN date >  date(a,'-60 days')
+                AND date <  date(a,'-30 days') THEN count ELSE 0 END) AS prev_30d
+    FROM (SELECT d.package, d.date, d.count, COALESCE(x.anchor, '%1$s') AS a
+          FROM %2$s d LEFT JOIN temp.c2d4u_summary_anchor x ON x.package = d.package)
+    GROUP BY package", a, DAILY_TABLE))
 
   if (nrow(agg) == 0L && is.null(prior_summary)) return(empty_summary())
 
@@ -451,6 +484,218 @@ summary_integrity_core <- function(db_path, complete = TRUE) {
   )
 }
 
+# Fingerprint of one published db asset, recorded as its manifest shards entry
+# so the next run can prove it downloaded exactly what was published: sha256 of
+# the file bytes plus rows, sum and date range. A daily shard (year or recent)
+# is described by its daily table: sum is SUM(count). The summary DB has no
+# daily table and is described by its summary table: rows are packages, sum is
+# SUM(cnt_total) and the dates span first_date..last_date. sum is a double so a
+# large total never overflows R's 32-bit integer.
+asset_fingerprint <- function(path) {
+  stopifnot(file.exists(path))
+  con <- DBI::dbConnect(RSQLite::SQLite(), path, flags = RSQLite::SQLITE_RO)
+  # Read the aggregates, then close the connection BEFORE hashing the bytes.
+  agg <- tryCatch({
+    tabs <- DBI::dbListTables(con)
+    sql <- if (DAILY_TABLE %in% tabs)
+      sprintf("SELECT COUNT(*) AS n, SUM(count) AS s, MIN(date) AS lo, MAX(date) AS hi FROM %s",
+              DAILY_TABLE)
+    else if (SUMMARY_TABLE %in% tabs)
+      sprintf("SELECT COUNT(*) AS n, SUM(cnt_total) AS s, MIN(first_date) AS lo,
+                      MAX(last_date) AS hi FROM %s", SUMMARY_TABLE)
+    else stop("asset_fingerprint: ", basename(path), " has neither a ", DAILY_TABLE,
+              " nor a ", SUMMARY_TABLE, " table")
+    DBI::dbGetQuery(con, sql)
+  }, finally = DBI::dbDisconnect(con))
+  list(sha256   = file_sha256(path),
+       rows     = as.integer(agg$n),
+       sum      = if (is.na(agg$s)) 0 else as.numeric(agg$s),
+       date_min = as.character(agg$lo),
+       date_max = as.character(agg$hi))
+}
+
+# Check that the assets downloaded from the published release into `out_dir`
+# are exactly the ones its manifest describes, before anything builds on them.
+# Every asset named in prev_manifest$shards must be present with the recorded
+# sha256, and no year, recent or summary shard may be present that the manifest
+# does not name. A publish uploads the shards one by one and the manifest last,
+# so a publish that failed partway leaves newer shards next to the old manifest
+# and roster; building on that would count the same downloads twice. Stops
+# listing every problem, else returns the verified names invisibly.
+# require_fingerprints = FALSE accepts entries without a sha256 (manifests from
+# before fingerprints existed) as long as the file is present; it still rejects
+# an unnamed year shard, but not an unnamed recent or summary shard, which those
+# manifests never listed.
+verify_release <- function(out_dir, prev_manifest, require_fingerprints = TRUE) {
+  shards <- prev_manifest$shards %||% list()
+  named  <- names(shards) %||% character(0)
+  problems <- character(0)
+  for (f in named) {
+    p <- file.path(out_dir, f)
+    want <- shards[[f]]$sha256
+    if (!file.exists(p)) {
+      problems <- c(problems, sprintf("%s is in the manifest but was not downloaded", f))
+    } else if (is.null(want)) {
+      if (isTRUE(require_fingerprints))
+        problems <- c(problems, sprintf("%s has no sha256 in the manifest", f))
+    } else if (!identical(file_sha256(p), tolower(as.character(want)))) {
+      problems <- c(problems, sprintf("%s does not match its manifest sha256", f))
+    }
+  }
+  local <- list.files(out_dir,
+    pattern = sprintf("^%s-(20[0-9]{2}|recent|summary)\\.db$", SHARD_PREFIX))
+  extra <- setdiff(local, named)
+  if (!isTRUE(require_fingerprints))
+    extra <- extra[grepl(sprintf("^%s-20[0-9]{2}\\.db$", SHARD_PREFIX), extra)]
+  if (length(extra))
+    problems <- c(problems, sprintf("%s is not in the manifest", extra))
+  if (length(problems))
+    stop("torn or foreign release: ", paste(problems, collapse = "; "),
+         ". The published assets are not one complete publish of this pipeline;",
+         " complete the publish that stopped partway from its workflow artifact (see the",
+         " README), or run backfill.yml to republish them", call. = FALSE)
+  invisible(named)
+}
+
+# The manifest every publisher of a summed release writes (the backfill merge
+# and the monthly update), built in one place so the two cannot drift. `base`
+# carries the publisher's own fields (tag, timestamps, source_kind,
+# changed_shards, summary, and the previous shards map, if any); this adds:
+#   history_method     HISTORY_METHOD: the daily history sums every release's
+#                      downloads per (package, date). The update refuses a
+#                      release without it.
+#   counted_through    last day fully counted (YYYY-MM-DD); summary.latest_date
+#                      is set to it too, since the summary is anchored on it.
+#   package_edges      {package: YYYY-MM-DD} for packages whose data stops
+#                      before counted_through (their refresh was held back).
+#   known_gaps, detected_gaps (each {from, to}, and kind "stopped" on a quiet
+#                      stretch counted as downloads that stopped),
+#                      coverage_scope, unfetched_releases
+#   empty_once_releases  releases fetched in full once with no rows (done 2),
+#                      which the next monthly update asks for again
+#   refetch_from, package_refetch_from
+#                      the refetch floors: the next monthly update starts every
+#                      package's window no later than refetch_from (a day, or
+#                      absent) and a listed package's no later than its own
+#                      day, so days a run counted beyond the next window's
+#                      usual start are fetched a second time
+#   shards             each of published_files (in out_dir) fingerprinted by
+#                      asset_fingerprint over the base map; other entries kept.
+#   integrity core     summary_integrity_core(summary_path) at top level, with
+#                      complete = a summed history, no unfetched release, no
+#                      release answered empty only once and no held package.
+# package_edges, unfetched_releases, empty_once_releases, detected_gaps and
+# the refetch floors have no default: a republish (a reclassify) must carry
+# forward what the previous manifest says. An empty default would publish a
+# release with nothing held back, unfetched or awaiting a second answer, which
+# reads as complete, or drop a floor, leaving days fetched only once.
+# history_method is the method of the history being published. A publisher
+# that built a summed history keeps the default; a republish that did not
+# rebuild the history passes the previous manifest's value. NULL (the release
+# from before the summed backfill, which kept one release's partial count per
+# package-day) publishes neither history_method nor counted_through, so the
+# monthly update still refuses it, and complete is FALSE; counted_through then
+# only anchors summary.latest_date.
+# Call it after every published file is final: the fingerprints and the core
+# hash the bytes on disk.
+contract_manifest <- function(base, out_dir, published_files, counted_through,
+                              package_edges, unfetched_releases, empty_once_releases,
+                              detected_gaps, refetch_from, package_refetch_from,
+                              history_method = HISTORY_METHOD,
+                              summary_path = file.path(out_dir, sprintf("%s-summary.db", SHARD_PREFIX))) {
+  unstated <- c("package_edges", "unfetched_releases", "empty_once_releases", "detected_gaps",
+                "refetch_from", "package_refetch_from")[
+    c(missing(package_edges), missing(unfetched_releases), missing(empty_once_releases),
+      missing(detected_gaps), missing(refetch_from), missing(package_refetch_from))]
+  if (length(unstated))
+    stop("contract_manifest: state ", paste(unstated, collapse = ", "),
+         "; a republish carries them forward from the previous manifest")
+  if (!is.null(history_method) && !identical(history_method, HISTORY_METHOD))
+    stop("contract_manifest: history_method must be \"", HISTORY_METHOD,
+         "\" or NULL, not ", deparse(history_method))
+  summed <- !is.null(history_method)
+  ct <- if (is.null(counted_through) || length(counted_through) != 1L) NA
+        else as.Date(as.character(counted_through), format = "%Y-%m-%d")
+  if (is.na(ct)) stop("contract_manifest: counted_through must be one YYYY-MM-DD date")
+  ct <- format(ct, "%Y-%m-%d")
+  count <- function(x, what) {
+    n <- suppressWarnings(as.integer(x))
+    if (length(n) != 1L || is.na(n) || n < 0L)
+      stop("contract_manifest: ", what, " must be a non-negative count")
+    n
+  }
+  unfetched  <- count(unfetched_releases, "unfetched_releases")
+  empty_once <- count(empty_once_releases, "empty_once_releases")
+
+  # {package: YYYY-MM-DD}, sorted by package; {} (not []) when empty.
+  date_map <- function(x, what) {
+    x <- as.list(x)
+    if (length(x) == 0L) return(stats::setNames(list(), character(0)))
+    if (is.null(names(x)) || any(!nzchar(names(x))))
+      stop("contract_manifest: ", what, " must be named by package")
+    x <- lapply(x, function(v) format(as.Date(v), "%Y-%m-%d"))
+    x[order(names(x))]
+  }
+  edges  <- date_map(package_edges, "package_edges")
+  floors <- date_map(package_refetch_from, "package_refetch_from")
+  floor_all <- if (!is.null(refetch_from)) {
+    f <- if (length(refetch_from) == 1L) as.Date(as.character(refetch_from), format = "%Y-%m-%d")
+    if (length(f) != 1L || is.na(f))
+      stop("contract_manifest: refetch_from must be NULL or one YYYY-MM-DD date")
+    format(f, "%Y-%m-%d")
+  }
+  # {from, to}, plus kind "stopped" on a stretch counted as downloads that
+  # stopped (the monthly update fetches it again while it ends at
+  # counted_through).
+  gap <- function(from, to, kind = NULL) {
+    g <- list(from = as.character(from), to = as.character(to))
+    if (length(kind) && !is.na(kind)) {
+      if (!identical(as.character(kind), "stopped"))
+        stop("contract_manifest: a detected gap's kind must be \"stopped\", not ", deparse(kind))
+      g$kind <- "stopped"
+    }
+    g
+  }
+  gaps <- if (is.data.frame(detected_gaps))
+    lapply(seq_len(nrow(detected_gaps)), function(i)
+      gap(detected_gaps$from[i], detected_gaps$to[i], detected_gaps$kind[i]))
+  else lapply(detected_gaps, function(g) gap(g$from, g$to, g$kind))
+
+  fps <- stats::setNames(lapply(file.path(out_dir, published_files), asset_fingerprint),
+                         published_files)
+  out <- base
+  out$shards <- merge_shard_coverage(base$shards, fps)
+  out$summary <- base$summary %||% list()
+  out$summary$latest_date <- ct
+  # Assigning NULL drops a marker the base may carry, so an unsummed history
+  # never inherits one.
+  out$history_method     <- if (summed) HISTORY_METHOD
+  out$counted_through    <- if (summed) ct
+  out$package_edges      <- edges
+  out$known_gaps         <- KNOWN_SOURCE_GAPS
+  out$detected_gaps      <- gaps
+  out$coverage_scope     <- COVERAGE_SCOPE
+  out$unfetched_releases <- unfetched
+  out$empty_once_releases <- empty_once
+  out$refetch_from       <- floor_all              # NULL drops a stale one
+  out$package_refetch_from <- floors
+  core <- summary_integrity_core(summary_path,
+                                 complete = summed && unfetched == 0L && empty_once == 0L &&
+                                            length(edges) == 0L)
+  for (k in names(core)) out[[k]] <- core[[k]]
+  out
+}
+
+# Name the database assets a publisher rebuilt, for the workflow's publish step
+# (UPLOAD_LIST in out_dir). `gh release upload --clobber` deletes an asset
+# before uploading its replacement, so re-uploading one that did not change
+# only risks losing it; a heartbeat lists none and a reclassify only the
+# recent and summary shards.
+write_upload_list <- function(out_dir, files) {
+  writeLines(as.character(files), file.path(out_dir, UPLOAD_LIST))
+  invisible(files)
+}
+
 #' Serialize the manifest object to JSON.
 #'
 #' `core` (optional) is a named list of TOP-LEVEL fields to merge into the
@@ -537,32 +782,54 @@ load_releases <- function(path) {
   df
 }
 
+# Fetch every page of one collection serially. Stops when a page fails, when a
+# later page reports another total than the first (same_total), and when the
+# pages did not return exactly the first page's total (all_rows_came), so a
+# caller counts the item as failed rather than short or counted twice.
 paginate <- function(fetch, first_url, parse_fn, field) {
-  acc <- list(); url <- first_url; guard <- 0L
+  acc <- list(); url <- first_url; guard <- 0L; total <- NA_real_
   while (length(url) == 1L && !is.na(url)) {
     guard <- guard + 1L
     if (guard > 100000L) stop("paginate: runaway paging")
     txt <- fetch(url)
     if (is.null(txt)) stop("paginate: fetch failed for ", url)
     pr <- parse_fn(txt)
+    if (guard == 1L) total <- pr$total %||% NA_real_
+    else if (!same_total(total, pr$total))
+      stop(sprintf("paginate: the collection of %s changed size while it was paged (%s, then %s)",
+                   first_url, format(total), format(pr$total)))
     acc[[length(acc) + 1L]] <- pr[[field]]
     url <- pr$next_link
   }
   if (length(acc) == 0L) return(NULL)
-  do.call(rbind, acc)
+  out <- do.call(rbind, acc)
+  if (!all_rows_came(out, total))
+    stop(sprintf("paginate: the pages of %s returned %d rows, not the %s the first page reported",
+                 first_url, NROW(out), format(total)))
+  out
 }
 
 # ---------------------------------------------------------------------------
-# CONCURRENCY POOL (backfill). Fetch every url with a bounded curl::multi pool,
-# then make several retry passes over the failed/NULL indices with growing
-# sleeps so a 503 wave is ridden out rather than dropping data. Returns a list
-# aligned to `urls`: the response body string on HTTP 200, NULL otherwise.
-fetch_pool <- function(urls, pool = POOL, passes = FETCH_PASSES, block = 1500L) {
+# CONCURRENCY POOL. Fetch every url with a bounded curl::multi pool, then make
+# several retry passes over the failed/NULL indices with growing sleeps so a 503
+# wave is ridden out rather than dropping data. Returns a list aligned to `urls`:
+# the response body string on HTTP 200, NULL otherwise.
+#
+# `deadline` (a POSIXct on the `now` clock, or Inf for none) bounds the whole
+# call: each block's multi_run gets only the seconds left, requests still in
+# flight when it expires are cancelled, and no further block, backoff sleep or
+# retry pass starts. Urls not reached stay NULL, the same as a failed fetch, so
+# callers treat them as unfetched.
+fetch_pool <- function(urls, pool = POOL, passes = FETCH_PASSES, block = 1500L,
+                       deadline = Inf, now = Sys.time) {
   out <- vector("list", length(urls))
   n <- length(urls)
   if (n == 0L) return(out)
+  secs_left <- function() as.numeric(deadline) - as.numeric(now())
   run <- function(idxs) {
     for (s in seq(1L, length(idxs), by = block)) {
+      left <- secs_left()
+      if (left <= 0) return(invisible(NULL))
       e   <- min(s + block - 1L, length(idxs))
       sel <- idxs[s:e]
       p   <- curl::new_pool(total_con = pool, host_con = pool)
@@ -577,13 +844,17 @@ fetch_pool <- function(urls, pool = POOL, passes = FETCH_PASSES, block = 1500L) 
             pool = p)
         })
       }
-      curl::multi_run(pool = p)
+      curl::multi_run(timeout = left, pool = p)
+      # multi_run returns at the deadline with requests still queued or in
+      # flight; cancel them so their connections close and their urls stay NULL.
+      for (h in curl::multi_list(p)) curl::multi_cancel(h)
     }
   }
   run(seq_len(n))
   for (k in seq_len(passes - 1L)) {
     failed <- which(vapply(out, is.null, logical(1)))
     if (length(failed) == 0L) break
+    if (secs_left() <= 3 * k) break   # no time left for the backoff and another pass
     Sys.sleep(3 * k)   # growing backoff between passes
     run(failed)
   }
@@ -595,28 +866,45 @@ fetch_pool <- function(urls, pool = POOL, passes = FETCH_PASSES, block = 1500L) 
 # next_collection_link concurrently until every item is exhausted. Only a handful
 # of names/releases exceed one page, so later waves shrink quickly. Returns
 # list(data = per-item field data.frame or partial/NULL, ok = logical: TRUE only
-# where the item fully completed with no failed page).
-fetch_paginated <- function(fetch_many, first_urls, parse_fn, field) {
+# where the item fully completed with no failed page and, when its first page
+# reported the collection's total, with every later page reporting the same
+# total and exactly that many rows: see same_total and all_rows_came).
+#
+# `deadline` (a POSIXct on the `now` clock, or Inf) stops the paging: no wave
+# starts once it has passed, and items still paging keep ok = FALSE. It is also
+# passed to a fetch_many that has a `deadline` argument (the real pool), so a
+# wave in flight stops at it too; a plain function(urls) is called unchanged.
+# data for an item that is not ok may hold the pages fetched before it stopped,
+# so callers must never count rows from an item that is not ok.
+fetch_paginated <- function(fetch_many, first_urls, parse_fn, field,
+                            deadline = Inf, now = Sys.time) {
   n <- length(first_urls)
   acc <- vector("list", n)         # accumulated field rows per item
   ok  <- logical(n)                # settled-complete flag per item
+  total <- rep(NA_real_, n)        # the collection size the first page reported
+  seen <- logical(n)               # the first page has been parsed
   cur <- first_urls                # current url to fetch per item
   active <- seq_len(n)
   guard <- 0L
+  many <- if ("deadline" %in% names(formals(fetch_many)))
+            function(u) fetch_many(u, deadline = deadline) else fetch_many
   while (length(active) > 0L) {
     guard <- guard + 1L
     if (guard > 100000L) stop("fetch_paginated: runaway paging")
-    bodies <- fetch_many(cur[active])
+    if (as.numeric(now()) >= as.numeric(deadline)) break
+    bodies <- many(cur[active])
     nxt <- integer(0)
     for (m in seq_along(active)) {
       i <- active[m]; body <- bodies[[m]]
       if (is.null(body)) next          # failed page -> item stays ok=FALSE
       pr <- tryCatch(parse_fn(body), error = function(e) NULL)
       if (is.null(pr)) next
+      if (!seen[i]) { total[i] <- pr$total %||% NA_real_; seen[i] <- TRUE }
+      else if (!same_total(total[i], pr$total)) next   # changed while paged: not ok
       acc[[i]] <- if (is.null(acc[[i]])) pr[[field]] else rbind(acc[[i]], pr[[field]])
       nl <- pr$next_link
       if (length(nl) == 1L && !is.na(nl)) { cur[i] <- nl; nxt <- c(nxt, i) }
-      else ok[i] <- TRUE
+      else ok[i] <- all_rows_came(acc[[i]], total[i])
     }
     active <- nxt
   }
@@ -659,8 +947,11 @@ candidate_binary_names <- function(cran_names, archive_names, bioc_names = chara
 }
 
 # Enumerate every candidate name for one archive via the per-name filtered query
-# through `fetch_many` (concurrent). Names that 503 or 404 simply contribute no
-# rows. Returns entries tagged with the archive key (empty-with-archive if none).
+# through `fetch_many` (concurrent). Names that 503 or 404 contribute no rows,
+# so the names whose query failed are counted in the log (the first ten by
+# name): without it a Launchpad outage during the enumerate would shrink the
+# roster silently. Returns entries tagged with the archive key
+# (empty-with-archive if none).
 enumerate_names <- function(fetch_many, candidates, archive, batch = ENUM_BATCH) {
   empty <- cbind(archive = character(0),
     data.frame(pub_id = integer(0), binary_name = character(0),
@@ -668,18 +959,19 @@ enumerate_names <- function(fetch_many, candidates, archive, batch = ENUM_BATCH)
                status = character(0), date_published = character(0),
                stringsAsFactors = FALSE))
   if (length(candidates) == 0L) return(empty)
-  acc <- list()
-  batches <- split(candidates, ceiling(seq_along(candidates) / batch))
-  for (nm in batches) {
+  acc <- list(); failed <- character(0)
+  for (nm in split(candidates, ceiling(seq_along(candidates) / batch))) {
     urls <- vapply(nm, function(x) lp_name_query_url(archive, x), character(1))
     res <- fetch_paginated(fetch_many, urls, parse_published_page, "entries")
-    got <- res$ok
-    if (any(got)) {
-      ent_list <- res$data[got]
-      ent <- do.call(rbind, ent_list[!vapply(ent_list, is.null, logical(1))])
-      if (!is.null(ent) && nrow(ent) > 0L) acc[[length(acc) + 1L]] <- ent
-    }
+    failed <- c(failed, nm[!res$ok])
+    ent <- do.call(rbind, res$data[res$ok])
+    if (!is.null(ent) && nrow(ent) > 0L) acc[[length(acc) + 1L]] <- ent
   }
+  shown <- if (length(failed) == 0L) ""
+           else sprintf(" (%s%s)", paste(utils::head(failed, 10L), collapse = ", "),
+                        if (length(failed) > 10L) ", ..." else "")
+  message(sprintf("enumerate %s: %d of %d candidate names failed%s",
+                  archive$key, length(failed), length(candidates), shown))
   if (length(acc) == 0L) return(empty)
   cbind(archive = archive$key, do.call(rbind, acc), stringsAsFactors = FALSE)
 }
@@ -689,18 +981,6 @@ enumerate_names <- function(fetch_many, candidates, archive, batch = ENUM_BATCH)
 shard_rows <- function(n, i, N) {
   if (n == 0L || N <= 0L) return(integer(0))
   which(((seq_len(n) - 1L) %% N) == i)
-}
-
-enumerate_archive <- function(fetch, archive) {
-  ent <- paginate(fetch, lp_published_url(archive), parse_published_page, "entries")
-  if (is.null(ent) || nrow(ent) == 0L) {
-    return(cbind(archive = character(0),
-                 data.frame(pub_id = integer(0), binary_name = character(0),
-                            version = character(0), arch = character(0),
-                            status = character(0), date_published = character(0),
-                            stringsAsFactors = FALSE)))
-  }
-  cbind(archive = archive$key, ent, stringsAsFactors = FALSE)
 }
 
 dedup_releases <- function(entries) {
